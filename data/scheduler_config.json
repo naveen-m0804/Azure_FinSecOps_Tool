@@ -1,0 +1,12 @@
+{
+  "email_config": {
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "use_tls": true,
+    "sender_email": "",
+    "sender_password": "",
+    "default_receiver": "",
+    "default_cc": ""
+  },
+  "schedules": []
+}

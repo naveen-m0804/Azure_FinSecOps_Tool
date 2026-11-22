@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Azure FinSecOps</title>
+  <link rel="icon" type="image/png" href="/static/images/azure_finsec_ops_icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.7">
+</head>
+<body>
+
+  <!-- ============================================================ -->
+  <!-- VIEW 1: AZURE SERVICE PRINCIPAL CONNECTION VIEW               -->
+  <!-- ============================================================ -->
+  <div id="connectionView" class="auth-wrapper">
+    <div class="auth-main-container">
+      
+      <!-- Top Brand Header Bar -->
+      <div class="auth-header-bar">
+        <div class="auth-brand-row">
+          <img src="/static/images/azure_finsec_ops_icon.png" alt="Azure FinSecOps Logo" class="brand-logo-img">
+          <div class="brand-text-block">
+            <h1 class="brand-name">Azure FinSecOps</h1>
+            <div class="brand-tagline">Enterprise Financial Optimization &amp; Security Posture</div>
+          </div>
+        </div>
+        <div class="auth-header-status">
+          <span class="auth-status-pill-light">
+            <span class="pulse-dot"></span> Evaluation Engine Ready
+          </span>
+        </div>
+      </div>
+
+      <!-- Top Row: Dual Cards (Azure Credentials on Left + Subscription IDs Table on Right) -->
+      <div class="auth-cards-grid">
+        
+        <!-- CARD 1 (LEFT): Azure Service Principal Credentials Card -->
+        <div class="auth-card-modern">
+          <div class="auth-card-header">
+            <div class="card-header-top">
+              <span class="azure-chip">
+                <i class="fa-brands fa-microsoft"></i> Azure Public Cloud
+              </span>
+              <span class="security-chip">
+                <i class="fa-solid fa-shield-halved"></i> Read-Only Roles
+              </span>
+            </div>
+            <h3 class="card-title">Azure Credentials</h3>
+            <p class="card-subtitle">Provide Service Principal credentials to authenticate your estate</p>
+          </div>
+
+          <div id="connectionAlert" class="alert-box d-none">
+            <i class="fa-solid fa-triangle-exclamation mr-1"></i>
+            <span id="connectionAlertText"></span>
+          </div>
+
+          <form id="connectForm" class="auth-form-modern">
+            <div class="form-group-modern">
+              <label for="workspaceName">
+                <i class="fa-regular fa-building"></i> Customer / Workspace Name <span class="text-danger">*</span>
+              </label>
+              <input type="text" id="workspaceName" placeholder="e.g. Production Environment" class="input-modern" required>
+            </div>
+
+            <div class="form-group-modern">
+              <label for="tenantId">
+                <i class="fa-solid fa-fingerprint"></i> Azure Tenant ID (GUID) <span class="text-danger">*</span>
+              </label>
+              <input type="text" id="tenantId" placeholder="00000000-0000-0000-0000-000000000000" class="input-modern font-mono" required>
+            </div>
+
+            <div class="form-group-modern">
+              <label for="clientId">
+                <i class="fa-solid fa-id-badge"></i> Service Principal Client ID (GUID) <span class="text-danger">*</span>
+              </label>
+              <input type="text" id="clientId" placeholder="00000000-0000-0000-0000-000000000000" class="input-modern font-mono" required>
+            </div>
+
+            <div class="form-group-modern">
+              <label for="clientSecret">
+                <i class="fa-solid fa-key"></i> Client Secret Value <span class="text-danger">*</span>
+              </label>
+              <div class="password-wrapper-modern">
+                <input type="password" id="clientSecret" placeholder="Paste service principal secret" class="input-modern font-mono" required>
+                <button type="button" id="toggleSecretBtn" class="btn-icon-modern" title="Toggle Secret Visibility">
+                  <i class="fa-solid fa-eye"></i>
+                </button>
+              </div>
+            </div>
+
+            <input type="hidden" id="targetTags" name="targetTags" value="">
+
+            <button type="submit" id="connectSubmitBtn" class="btn btn-connect-azure btn-block btn-modern">
+              <i class="fa-solid fa-plug"></i> Connect to Azure
+            </button>
+          </form>
+        </div>
+
+        <!-- CARD 2 (RIGHT): Target Subscription IDs Table Card -->
+        <div class="auth-subs-card" id="subsCardContainer">
+          <div class="subs-card-header">
+            <div class="subs-header-left">
+              <div class="subs-header-title-row">
+                <i class="fa-solid fa-layer-group text-purple" id="subsHeaderIcon"></i>
+                <h3 class="card-title">Target Subscriptions</h3>
+                <span class="subs-count-pill d-none" id="subsVerifiedBadge">
+                  <i class="fa-solid fa-layer-group"></i> <span id="subsCountText"></span>
+                </span>
+              </div>
+              <p class="card-subtitle" id="subsCardSubtitle">
+                By default, all accessible subscriptions in your tenant are analyzed. Click <strong>"Enter Subscription IDs"</strong> if you want to scope the assessment to specific subscriptions.
+              </p>
+            </div>
+            <div class="subs-header-actions">
+              <button type="button" class="btn btn-primary-outline btn-sm" id="btnToggleSubsTable">
+                <i class="fa-solid fa-list-check"></i> Enter Subscription IDs
+              </button>
+              <button type="button" class="btn btn-outline-purple btn-sm d-none" id="btnAddSubscriptionRow">
+                <i class="fa-solid fa-plus"></i> Add Row
+              </button>
+            </div>
+          </div>
+
+          <!-- Subscription ID Table Container -->
+          <div class="subs-table-wrapper" id="subsTableWrapper">
+            <div id="subsDefaultNotice" class="subs-default-banner">
+              <div class="banner-icon"><i class="fa-solid fa-cloud-arrow-down"></i></div>
+              <div class="banner-body">
+                <strong>Full Tenant Scope (Default)</strong>
+                <p>The platform will automatically discover and evaluate all accessible subscriptions in your tenant. To evaluate only specific subscriptions, click <strong>"Enter Subscription IDs"</strong> above.</p>
+              </div>
+            </div>
+            <table class="table-subs-modern d-none" id="subsTable">
+              <thead>
+                <tr>
+                  <th class="col-center" style="width: 42px;">#</th>
+                  <th style="width: 42%;">Subscription ID (GUID)</th>
+                  <th style="width: 32%;">Subscription Name</th>
+                  <th style="width: 20%;">Live Status</th>
+                  <th class="col-center" style="width: 42px;"></th>
+                </tr>
+              </thead>
+              <tbody id="subsTableBody">
+                <!-- Dynamically managed rows -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Environment Evaluation Tags Section -->
+          <div class="subs-tags-box" id="subsTagsBox">
+            <div class="subs-tags-header">
+              <div class="subs-tags-title">
+                <i class="fa-solid fa-tags text-purple"></i>
+                <label for="tagInput" class="subs-tags-label">Environment Evaluation Tags <span class="text-muted" style="font-weight: normal; font-size: 11px;">(Optional)</span></label>
+              </div>
+              <span class="tags-count-badge" id="tagsCountBadge">0 configured (Optional)</span>
+            </div>
+            
+            <div class="tag-input-row-modern">
+              <div class="tag-input-pill-wrapper">
+                <i class="fa-solid fa-tag text-purple tag-input-prefix"></i>
+                <input type="text" id="tagInput" class="tag-pill-input" placeholder="Type tag keyword (e.g. prod, test, dev, staging, uat)" onkeydown="if(event.key==='Enter'||event.keyCode===13){event.preventDefault();event.stopPropagation();window.handleAddTagInput();}">
+                <button type="button" id="btnAddTag" class="btn-tag-pill-add" title="Add Tag" onclick="handleAddTagInput()">
+                  <i class="fa-solid fa-plus"></i> Add
+                </button>
+              </div>
+            </div>
+
+            <!-- Dynamic Tag Pills Container with Cross Buttons -->
+            <div class="tags-pills-container" id="tagsPillsContainer"></div>
+
+            <!-- Simple Text Hint -->
+            <div class="tags-hint-text" id="tagsHintText">
+              <i class="fa-solid fa-circle-info text-purple"></i> Optional. Add environment keywords one by one (e.g. prod, test, dev, staging, uat). If omitted, all resources are evaluated. If specified, tag-dependent assessments strictly evaluate matching resources (case-sensitive).
+            </div>
+          </div>
+
+          <div class="subs-table-footer">
+            <div class="subs-footer-note">
+              <i class="fa-solid fa-shield-halved text-purple"></i>
+              <span>At least one accessible subscription must exist in the tenant. If specific IDs are entered, only those verified subscriptions will be analyzed.</span>
+            </div>
+          </div>
+        </div>
+
+      </div> <!-- /auth-cards-grid -->
+
+      <!-- Bottom Section: Platform Showcase & Capabilities (Put below) -->
+      <div class="auth-showcase-bottom">
+        <div class="showcase-bottom-header">
+          <h2 class="showcase-bottom-title">
+            Unified Cloud Financial Optimization &amp; Security Governance
+          </h2>
+          <p class="showcase-bottom-desc">
+            Direct read-only telemetry across your entire Azure estate. Uncover hidden financial waste, enforce zero-trust security postures, and compile boardroom deliverables in one click.
+          </p>
+        </div>
+
+        <!-- 3 Feature Highlight Mini-Cards in 3 Columns -->
+        <div class="showcase-pillars-grid">
+          <div class="pillar-mini-card card-purple-tint">
+            <div class="mini-icon icon-purple">
+              <i class="fa-solid fa-shield-halved"></i>
+            </div>
+            <div class="mini-content">
+              <h4>14 Security Governance Audits</h4>
+              <p>Defender controls, Attack Paths, TLS 1.0/1.1 deprecation, diagnostic logging, and RBAC governance.</p>
+            </div>
+          </div>
+
+          <div class="pillar-mini-card card-red-tint">
+            <div class="mini-icon icon-red">
+              <i class="fa-solid fa-coins"></i>
+            </div>
+            <div class="mini-content">
+              <h4>19 FinOps Cost Optimizations</h4>
+              <p>Idle VMs, unattached disks, storage lifecycle policies, backup retention, and AHB licensing.</p>
+            </div>
+          </div>
+
+          <div class="pillar-mini-card card-gradient-tint">
+            <div class="mini-icon icon-gradient">
+              <i class="fa-solid fa-file-contract"></i>
+            </div>
+            <div class="mini-content">
+              <h4>Executive &amp; Technical Reports</h4>
+              <p>Audit-ready PDF reports and granular multi-tab Excel workbooks in native tenant currency.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Quick Metrics Bar & Trust Note -->
+        <div class="showcase-bottom-footer">
+          <div class="showcase-stats-bar-light">
+            <div class="stat-item">
+              <span class="stat-number text-purple">33</span>
+              <span class="stat-label">Assessment Modules</span>
+            </div>
+            <div class="stat-sep-light"></div>
+            <div class="stat-item">
+              <span class="stat-number text-dark">100%</span>
+              <span class="stat-label">Read-Only REST API</span>
+            </div>
+            <div class="stat-sep-light"></div>
+            <div class="stat-item">
+              <span class="stat-number text-red">0</span>
+              <span class="stat-label">Agents Required</span>
+            </div>
+          </div>
+
+          <div class="showcase-trust-note-light">
+            <i class="fa-solid fa-lock text-green"></i>
+            <span>Zero agent footprint • Non-invasive read-only queries • AES-256 encrypted in-transit</span>
+          </div>
+        </div>
+      </div> <!-- /auth-showcase-bottom -->
+
+    </div> <!-- /auth-main-container -->
+  </div> <!-- /connectionView -->
+
+  <!-- ============================================================ -->
+  <!-- VIEW 2: MAIN FINSECOPS WORKSPACE DASHBOARD VIEW               -->
+  <!-- ============================================================ -->
+  <div id="dashboardView" class="app-layout d-none">
+    <!-- Navbar -->
+    <header class="navbar">
+      <div class="container navbar-inner">
+        <div class="brand-group">
+          <img src="/static/images/azure_finsec_ops_icon.png" alt="Azure FinSecOps Logo" class="navbar-brand-logo">
+          <div>
+            <div class="brand-title">
+              Azure FinSecOps
+            </div>
+          </div>
+        </div>
+
+        <nav class="nav-tabs">
+          <button class="nav-tab-btn active" data-tab="tab-overview">
+            <i class="fa-solid fa-chart-pie"></i> Overview
+          </button>
+          <button class="nav-tab-btn" data-tab="tab-security">
+            <i class="fa-solid fa-shield-halved"></i> Security Assessment
+          </button>
+          <button class="nav-tab-btn" data-tab="tab-cost">
+            <i class="fa-solid fa-coins"></i> Cost Assessment
+          </button>
+          <button class="nav-tab-btn" data-tab="tab-scheduler">
+            <i class="fa-solid fa-calendar-check"></i> Scheduler
+          </button>
+        </nav>
+
+        <div class="nav-right">
+          <div class="session-pill">
+            <i class="fa-solid fa-cloud text-blue"></i>
+            <span id="sessionWorkspace">Azure Workspace</span>
+          </div>
+          <button id="disconnectBtn" class="btn btn-ghost btn-sm" title="Disconnect Session">
+            <i class="fa-solid fa-right-from-bracket"></i> Disconnect
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace Content -->
+    <main class="container main-body">
+      <!-- ============================================================ -->
+      <!-- TAB 1: OVERVIEW                                              -->
+      <!-- ============================================================ -->
+      <div id="tab-overview" class="tab-pane active">
+        <!-- Global Controls & Execution Bar -->
+        <section class="execution-bar">
+          <div class="execution-header-text">
+            <h2 id="viewGreeting">Assessment Dashboard</h2>
+            <p class="execution-header-desc">Execute security compliance scans and FinOps cost optimization assessments across your verified Azure estate.</p>
+          </div>
+          <div class="btn-group execution-btn-group">
+            <button id="runSecurityBtn" class="btn btn-exec-sec">
+              <i class="fa-solid fa-shield-halved"></i> Run Security Assessment
+            </button>
+            <button id="runCostBtn" class="btn btn-exec-cost">
+              <i class="fa-solid fa-coins"></i> Run Cost Assessment
+            </button>
+            <button id="runAllBtn" class="btn btn-exec-all">
+              <i class="fa-solid fa-play"></i> Run All Assessments
+            </button>
+          </div>
+        </section>
+
+        <!-- INLINE STATUS BAR (Directly below run assessment buttons) -->
+        <div id="inlineStatusBar" class="inline-status-bar d-none">
+          <div class="status-bar-content">
+            <div class="status-indicator">
+              <i id="statusIcon" class="fa-solid fa-circle-notch fa-spin text-purple"></i>
+              <span id="statusMessage">Evaluating Azure resources in real-time...</span>
+            </div>
+            <div class="status-meta">
+              <span id="statusPercentage" class="font-mono text-purple">0%</span>
+              <span id="statusDuration" class="font-mono text-muted">0.0s</span>
+              <button id="dismissStatusBtn" class="status-dismiss-btn d-none" title="Dismiss">
+                <i class="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+          </div>
+          <div class="status-progress-track">
+            <div id="statusProgressBar" class="status-progress-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- KPI METRICS GRID (6 CARDS WITH DISTINCT VIBRANT COLORS) -->
+        <section class="kpi-grid-6">
+          <!-- 1. Total Subscriptions Card -->
+          <div class="kpi-card kpi-blue">
+            <div class="kpi-top">
+              <span class="kpi-label">Total Subscriptions</span>
+              <span class="kpi-icon icon-blue"><i class="fa-solid fa-cloud"></i></span>
+            </div>
+            <div class="kpi-value text-blue" id="kpiSubs">0</div>
+            <div class="kpi-sub">Discovered tenant scopes</div>
+          </div>
+
+          <!-- 2. Current Security Score -->
+          <div class="kpi-card kpi-purple">
+            <div class="kpi-top">
+              <span class="kpi-label">Current Security Score</span>
+              <span class="kpi-icon icon-purple"><i class="fa-solid fa-shield-halved"></i></span>
+            </div>
+            <div class="kpi-value text-purple" id="kpiCurrentScore">--%</div>
+            <div class="kpi-sub">Baseline posture score</div>
+          </div>
+
+          <!-- 3. Achievable Security Score -->
+          <div class="kpi-card kpi-cyan">
+            <div class="kpi-top">
+              <span class="kpi-label">Achievable Security Score</span>
+              <span class="kpi-icon icon-cyan"><i class="fa-solid fa-circle-check"></i></span>
+            </div>
+            <div class="kpi-value text-cyan" id="kpiAchievableScore">--%</div>
+            <div class="kpi-sub" title="Calculated from active Microsoft Defender recommendations that award points.">
+              Remediation Potential <i class="fa-solid fa-shield-check" style="font-size:0.75rem; opacity:0.85;"></i>
+            </div>
+          </div>
+
+          <!-- 4. Current Cost Wastage -->
+          <div class="kpi-card kpi-rose">
+            <div class="kpi-top">
+              <span class="kpi-label">Current Cost Wastage</span>
+              <span class="kpi-icon icon-rose"><i class="fa-solid fa-triangle-exclamation"></i></span>
+            </div>
+            <div class="kpi-value text-rose" id="kpiCostWastage">$0.00</div>
+            <div class="kpi-sub">Identified monthly leakage</div>
+          </div>
+
+          <!-- 5. Monthly Savings -->
+          <div class="kpi-card kpi-emerald">
+            <div class="kpi-top">
+              <span class="kpi-label">Monthly Savings</span>
+              <span class="kpi-icon icon-emerald"><i class="fa-solid fa-wallet"></i></span>
+            </div>
+            <div class="kpi-value text-emerald" id="kpiMonthlySavings">$0.00</div>
+            <div class="kpi-sub">Deduplicated monthly reduction</div>
+          </div>
+
+          <!-- 6. Annual Savings (DARK GREEN) -->
+          <div class="kpi-card kpi-darkgreen">
+            <div class="kpi-top">
+              <span class="kpi-label">Annual Savings</span>
+              <span class="kpi-icon icon-darkgreen"><i class="fa-solid fa-chart-line"></i></span>
+            </div>
+            <div class="kpi-value text-darkgreen" id="kpiAnnualSavings">$0.00</div>
+            <div class="kpi-sub">12-month recurring reduction</div>
+          </div>
+        </section>
+
+        <!-- ASSESSMENT REPORTS IN ONE ROW (3 Cards Directly Below Scores Card) -->
+        <section class="reports-row-section">
+          <div class="reports-grid-3">
+            <!-- Card 1: Security Assessment Report -->
+            <div class="report-card report-card-security">
+              <div class="report-card-top">
+                <div class="report-card-icon icon-purple">
+                  <i class="fa-solid fa-shield-halved"></i>
+                </div>
+                <div>
+                  <h4 class="report-card-title">Security Assessment Report</h4>
+                  <p class="report-card-sub">Posture score, Defender benchmarks & hardening remediation</p>
+                </div>
+              </div>
+              <div class="report-card-actions">
+                <button id="btnDownloadSecPdf" class="btn btn-pdf btn-disabled" data-type="security" data-format="pdf" title="First run the assessment">
+                  <i class="fa-solid fa-file-pdf"></i> PDF
+                </button>
+                <button id="btnDownloadSecXlsx" class="btn btn-excel btn-disabled" data-type="security" data-format="excel" title="First run the assessment">
+                  <i class="fa-solid fa-file-excel"></i> Excel
+                </button>
+              </div>
+            </div>
+
+            <!-- Card 2: Cost Assessment Report -->
+            <div class="report-card report-card-cost">
+              <div class="report-card-top">
+                <div class="report-card-icon icon-amber">
+                  <i class="fa-solid fa-coins"></i>
+                </div>
+                <div>
+                  <h4 class="report-card-title">Cost Assessment Report</h4>
+                  <p class="report-card-sub">Deduplicated savings findings, rightsizing & waste reduction</p>
+                </div>
+              </div>
+              <div class="report-card-actions">
+                <button id="btnDownloadCostPdf" class="btn btn-pdf btn-disabled" data-type="cost" data-format="pdf" title="First run the assessment">
+                  <i class="fa-solid fa-file-pdf"></i> PDF
+                </button>
+                <button id="btnDownloadCostXlsx" class="btn btn-excel btn-disabled" data-type="cost" data-format="excel" title="First run the assessment">
+                  <i class="fa-solid fa-file-excel"></i> Excel
+                </button>
+              </div>
+            </div>
+
+            <!-- Card 3: Security & Cost Assessment Report -->
+            <div class="report-card report-card-combined">
+              <div class="report-card-top">
+                <div class="report-card-icon icon-blue">
+                  <i class="fa-solid fa-layer-group"></i>
+                </div>
+                <div>
+                  <h4 class="report-card-title">Security &amp; Cost Assessment Report</h4>
+                  <p class="report-card-sub">Unified multi-pillar executive governance deliverable</p>
+                </div>
+              </div>
+              <div class="report-card-actions">
+                <button id="btnDownloadCombinedPdf" class="btn btn-pdf btn-disabled" data-type="combined" data-format="pdf" title="First run the assessment">
+                  <i class="fa-solid fa-file-pdf"></i> PDF
+                </button>
+                <button id="btnDownloadCombinedXlsx" class="btn btn-excel btn-disabled" data-type="combined" data-format="excel" title="First run the assessment">
+                  <i class="fa-solid fa-file-excel"></i> Excel
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- AI ADVISOR (Zero-Footprint Cloud & Assessment Intelligence) -->
+        <!-- ============================================================ -->
+        <section class="ai-advisor-section mt-6">
+          <div class="ai-advisor-card">
+            <!-- Header -->
+            <div class="ai-advisor-header">
+              <div class="ai-advisor-brand">
+                <img src="/static/images/aichatboticon.png" alt="AI Advisor" class="ai-advisor-avatar-img">
+                <div>
+                  <div class="ai-advisor-title-row">
+                    <h3 class="ai-advisor-title">FinSecOps Agentic AI</h3>
+                    <span class="ai-status-pill">
+                      <span class="pulse-indicator"></span>
+                      <span>Connected &bull; Read-Only Mode</span>
+                    </span>
+                  </div>
+                  <p class="ai-advisor-subtitle">Dynamic tool-calling intelligence across live Azure ARM/ARG, FinSecOps assessment reports &amp; cloud architecture</p>
+                </div>
+              </div>
+              <div class="ai-advisor-header-actions">
+                <button type="button" id="btnAiResetChat" class="btn btn-ghost btn-sm" title="Clear conversation history">
+                  <i class="fa-solid fa-rotate-left"></i> Reset Chat
+                </button>
+              </div>
+            </div>
+
+            <!-- Messages Area -->
+            <div class="ai-chat-body" id="aiChatBody">
+              <div class="ai-chat-messages" id="aiChatMessages">
+                <!-- Centered Minimalist Welcome Message in Middle of Chat Window -->
+                <div class="ai-welcome-box" id="aiWelcomeBox">
+                  <div class="ai-welcome-avatar-wrapper">
+                    <img src="/static/images/aichatboticon.png" alt="AI Advisor" class="ai-welcome-avatar">
+                  </div>
+                  <h3 class="ai-welcome-title">FinSecOps Agentic AI</h3>
+                  <p class="ai-welcome-desc">
+                    Intelligent autonomous agent with dynamic tool execution across your live Azure environment.<br>
+                    Query live resources, inspect Defender security posture, analyze FinOps spending, evaluate assessment findings, or get cloud architectural guidance.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Input Bar -->
+            <div class="ai-chat-input-container">
+              <div class="ai-input-wrapper">
+                <textarea id="aiChatInput" class="ai-chat-textarea" placeholder="Ask FinSecOps AI about live Azure VMs, storage, cost trends, Defender security scores, assessment reports, or cloud architecture..." rows="1"></textarea>
+                <button type="button" id="btnSendAiChat" class="btn-ai-send" title="Send query (Enter)">
+                  <i class="fa-solid fa-paper-plane"></i>
+                </button>
+              </div>
+              <div class="ai-input-footer">
+                <span class="ai-policy-footnote">
+                  <i class="fa-solid fa-shield-cat text-purple"></i> Scope: Azure Cloud, Infrastructure Architecture, Software Engineering &amp; Live Assessment Findings &bull; Zero Credential Footprint
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- TAB 2: SECURITY ASSESSMENT                                   -->
+      <!-- ============================================================ -->
+      <div id="tab-security" class="tab-pane">
+        <div class="tab-assessment-header">
+          <h2 class="tab-assessment-title" id="secWorkspaceTitle">Security Assessment</h2>
+          <p class="tab-assessment-desc">Comprehensive evaluation of subscription security posture, Defender recommendations, attack paths, missing patches, encryption, and access permissions.</p>
+        </div>
+        <div class="tab-controls">
+          <div class="search-box">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input type="text" id="secSearchInput" placeholder="Search security modules...">
+          </div>
+          <span class="item-count" id="secCountLabel">Security Modules</span>
+        </div>
+        <div class="cards-grid" id="securityCardsGrid">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- TAB 3: COST ASSESSMENT                                       -->
+      <!-- ============================================================ -->
+      <div id="tab-cost" class="tab-pane">
+        <div class="tab-assessment-header">
+          <h2 class="tab-assessment-title" id="costWorkspaceTitle">Cost Assessment</h2>
+          <p class="tab-assessment-desc">Financial optimization analysis spanning underutilized VMs, orphan disks, unused IPs, auto-shutdown schedules, and lifecycle tiering.</p>
+        </div>
+        <div class="tab-controls">
+          <div class="search-box">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input type="text" id="costSearchInput" placeholder="Search cost modules...">
+          </div>
+          <span class="item-count" id="costCountLabel">Cost Modules</span>
+        </div>
+        <div class="cards-grid" id="costCardsGrid">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- TAB 4: SCHEDULER & AUTOMATED EMAIL DISPATCH                  -->
+      <!-- ============================================================ -->
+      <div id="tab-scheduler" class="tab-pane">
+        <div class="scheduler-header-row">
+          <div>
+            <h2 class="tab-assessment-title">Assessment Scheduler &amp; Automated Email Dispatch</h2>
+            <p class="tab-assessment-desc">Schedule recurring security governance and FinOps assessments with executive report delivery directly to your inbox.</p>
+          </div>
+          <button id="openScheduleModalBtn" class="btn btn-primary btn-add-sched">
+            <i class="fa-solid fa-plus"></i> Schedule Assessment
+          </button>
+        </div>
+
+        <div class="scheduler-grid">
+          <!-- Left Column: Email Dispatcher Configuration -->
+          <div class="scheduler-card">
+            <div class="scheduler-card-header">
+              <div class="scheduler-card-icon email-icon">
+                <i class="fa-solid fa-envelope"></i>
+              </div>
+              <div>
+                <h3 class="scheduler-card-title">Email Dispatcher Configuration</h3>
+                <p class="scheduler-card-sub">SMTP credentials and default recipient settings for reports</p>
+              </div>
+            </div>
+
+            <div class="scheduler-card-body">
+              <form id="emailConfigForm" onsubmit="return false;">
+                <div class="form-group">
+                  <label class="form-label" for="schedSenderEmail">Sender Email Address <span class="text-danger">*</span></label>
+                  <input type="email" id="schedSenderEmail" class="form-control" placeholder="e.g. notifications@company.com" required>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" for="schedSenderPassword">Sender App Password / SMTP Password <span class="text-danger">*</span></label>
+                  <div class="password-input-group">
+                    <input type="password" id="schedSenderPassword" class="form-control" placeholder="16-character App Password / SMTP secret" autocomplete="off">
+                    <button type="button" id="toggleSchedPwdBtn" class="btn-toggle-pwd" title="Show/Hide Password">
+                      <i class="fa-regular fa-eye"></i>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="form-row-2">
+                  <div class="form-group">
+                    <label class="form-label" for="schedSmtpHost">SMTP Host Server</label>
+                    <input type="text" id="schedSmtpHost" class="form-control" value="smtp.gmail.com" placeholder="smtp.gmail.com" required>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="schedSmtpPort">SMTP Port</label>
+                    <input type="number" id="schedSmtpPort" class="form-control" value="587" placeholder="587" required>
+                  </div>
+                </div>
+
+                <div class="form-group checkbox-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="schedUseTls" checked>
+                    <span>Use STARTTLS Encryption (Recommended for Port 587)</span>
+                  </label>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" for="schedReceiverEmail">Default Primary Recipient(s)</label>
+                  <input type="text" id="schedReceiverEmail" class="form-control" placeholder="e.g. cloud-team@company.com, ops@company.com">
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" for="schedCcEmail">Default CC Recipient(s)</label>
+                  <input type="text" id="schedCcEmail" class="form-control" placeholder="e.g. ciso@company.com, finops@company.com">
+                </div>
+
+                <!-- Test Feedback Banner -->
+                <div id="emailTestFeedback" class="email-test-banner d-none"></div>
+
+                <div class="btn-group-scheduler">
+                  <button type="button" id="saveEmailConfigBtn" class="btn btn-primary">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Email Settings
+                  </button>
+                  <button type="button" id="testEmailConfigBtn" class="btn btn-outline">
+                    <i class="fa-solid fa-paper-plane"></i> Send Test Email
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Right Column: Active Scheduled Assessment Jobs Table -->
+          <div class="scheduler-card">
+            <div class="scheduler-card-header between">
+              <div class="header-left-flex">
+                <div class="scheduler-card-icon clock-icon">
+                  <i class="fa-solid fa-calendar-days"></i>
+                </div>
+                <div>
+                  <h3 class="scheduler-card-title">Scheduled Assessment Jobs</h3>
+                  <p class="scheduler-card-sub">Active recurring scan routines &amp; automated dispatch</p>
+                </div>
+              </div>
+              <span id="schedulesCountBadge" class="badge badge-primary">0 Active</span>
+            </div>
+
+            <div class="scheduler-card-body p-0">
+              <div id="schedulesEmptyState" class="schedules-empty-state">
+                <div class="empty-icon-wrap">
+                  <i class="fa-solid fa-calendar-plus"></i>
+                </div>
+                <h4>No Automated Schedules Configured</h4>
+                <p>Click the <strong>+ Schedule Assessment</strong> button above to automate recurring assessments with executive email reports.</p>
+              </div>
+
+              <div id="schedulesTableContainer" class="table-responsive d-none">
+                <table class="styled-table schedules-table">
+                  <thead>
+                    <tr>
+                      <th>Schedule Name</th>
+                      <th>Scope</th>
+                      <th>Frequency</th>
+                      <th>Next Run Time</th>
+                      <th>Recipients</th>
+                      <th>Status</th>
+                      <th class="text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="schedulesTableBody">
+                    <!-- Populated dynamically -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- MODAL: RESOURCE FINDINGS INSPECTOR                           -->
+  <!-- ============================================================ -->
+  <div id="findingsModal" class="modal-overlay d-none">
+    <div class="findings-dialog">
+      <div class="findings-modal-header">
+        <div>
+          <span id="modalAssCode" class="modal-code">SEC-01</span>
+          <h3 id="modalAssTitle" class="modal-title">Assessment Findings</h3>
+        </div>
+        <button id="closeFindingsModalBtn" class="modal-close-btn" title="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="findings-modal-body">
+        <div class="findings-meta-box">
+          <p id="modalAssDesc"></p>
+          <div class="meta-row-info">
+            <span><b>Data Source:</b> <span id="modalAssDataSource"></span></span>
+          </div>
+        </div>
+
+        <div class="table-responsive" style="margin-top: 16px;">
+          <table class="styled-table">
+            <thead id="findingsTableHead">
+              <!-- Dynamically populated based on assessment-specific schema -->
+            </thead>
+            <tbody id="findingsTableBody">
+              <!-- Dynamically populated findings -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- MODAL: CREATE ASSESSMENT SCHEDULE                            -->
+  <!-- ============================================================ -->
+  <div id="scheduleModal" class="modal-overlay d-none">
+    <div class="schedule-dialog">
+      <div class="findings-modal-header">
+        <div>
+          <span class="modal-code">AUTOMATION</span>
+          <h3 class="modal-title">Schedule New Assessment Routine</h3>
+        </div>
+        <button id="closeScheduleModalBtn" class="modal-close-btn" title="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="schedule-modal-body">
+        <form id="newScheduleForm" onsubmit="return false;">
+          <div class="form-group">
+            <label class="form-label" for="newSchedName">Schedule Name <span class="text-danger">*</span></label>
+            <input type="text" id="newSchedName" class="form-control" placeholder="e.g. Daily Executive Cloud Governance Routine" required>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label class="form-label" for="newSchedScope">Assessment Scope <span class="text-danger">*</span></label>
+              <select id="newSchedScope" class="form-control">
+                <option value="all">Comprehensive (Security + Cost Optimization)</option>
+                <option value="security">Security Governance &amp; Compliance Only</option>
+                <option value="cost">Financial Optimization (FinOps) Only</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="newSchedFreq">Run Frequency <span class="text-danger">*</span></label>
+              <select id="newSchedFreq" class="form-control">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="every_6_hours">Every 6 Hours</option>
+                <option value="hourly">Hourly</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row-3" id="frequencyDetailRow">
+            <div class="form-group">
+              <label class="form-label" for="newSchedTime">Execution Time (Local)</label>
+              <input type="time" id="newSchedTime" class="form-control" value="09:00">
+            </div>
+
+            <div class="form-group" id="schedDayOfWeekGroup" style="display:none;">
+              <label class="form-label" for="newSchedDayOfWeek">Day of Week</label>
+              <select id="newSchedDayOfWeek" class="form-control">
+                <option value="Monday">Monday</option>
+                <option value="Tuesday">Tuesday</option>
+                <option value="Wednesday">Wednesday</option>
+                <option value="Thursday">Thursday</option>
+                <option value="Friday">Friday</option>
+                <option value="Saturday">Saturday</option>
+                <option value="Sunday">Sunday</option>
+              </select>
+            </div>
+
+            <div class="form-group" id="schedDayOfMonthGroup" style="display:none;">
+              <label class="form-label" for="newSchedDayOfMonth">Day of Month</label>
+              <input type="number" id="newSchedDayOfMonth" class="form-control" min="1" max="28" value="1">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="newSchedRecipients">Recipient Email(s)</label>
+            <input type="text" id="newSchedRecipients" class="form-control" placeholder="e.g. secops@company.com, devops@company.com">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="newSchedCc">CC Email(s)</label>
+            <input type="text" id="newSchedCc" class="form-control" placeholder="e.g. ciso@company.com">
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="newSchedIncludeReport" checked>
+              <span>Include Complete Executive HTML Report in Email Body</span>
+            </label>
+          </div>
+
+          <div class="schedule-modal-footer">
+            <button type="button" id="cancelScheduleModalBtn" class="btn btn-secondary">Cancel</button>
+            <button type="button" id="submitCreateScheduleBtn" class="btn btn-primary">
+              <i class="fa-solid fa-calendar-check"></i> Create Schedule
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="/static/js/app.js?v=2.6"></script>
+</body>
+</html>
