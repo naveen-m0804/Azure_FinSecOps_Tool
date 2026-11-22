@@ -663,7 +663,7 @@ function renderTagPills() {
   if (badge) {
     const count = state.configuredTags.length;
     if (count === 0) {
-      badge.textContent = "0 configured (Optional)";
+      badge.textContent = "0 configured";
       badge.className = "tags-count-badge";
     } else {
       badge.textContent = `${count} configured`;
