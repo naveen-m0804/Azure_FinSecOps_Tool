@@ -42,7 +42,6 @@ COST_HIGH_LEVEL_CATEGORIES = [
         "module_ids": [
             "database_usage",                 # Database Usage – Threshold Limit Reached
             "storage_lifecycle",              # Storage Account LCM – Enabled Status
-            "database_sku",                   # Database SKU – Underutilized / Overutilized
             "backup_status",                  # Backup Status / Policy / Retention
             "old_snapshots",                  # Old Snapshot Expired
             "non_lrs_storage_redundancy",     # Non-LRS Storage Redundancy Optimization

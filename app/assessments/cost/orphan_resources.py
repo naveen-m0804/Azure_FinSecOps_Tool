@@ -36,6 +36,7 @@ class OrphanResourcesAssessment(BaseAssessment):
         findings: List[FindingModel] = []
         errors: List[str] = []
         total_resources_evaluated = 0
+        cost_start, cost_end, cost_month = CostManagementAdapter.get_last_completed_month_date_range()
 
         # Concurrent subscription evaluation to handle large enterprise tenants (25+ subs) in seconds
         sub_sem = asyncio.Semaphore(5)
@@ -46,6 +47,16 @@ class OrphanResourcesAssessment(BaseAssessment):
                 sub_findings = []
                 sub_errors = []
                 sub_eval_count = 0
+
+                try:
+                    cost_map = await CostManagementAdapter.query_resource_costs(
+                        context.client,
+                        subscription_id=sub.subscription_id,
+                        start_date=cost_start,
+                        end_date=cost_end
+                    )
+                except Exception:
+                    cost_map = {}
 
                 # 1. Unattached Managed Disks (managedBy is None)
                 try:
@@ -58,7 +69,10 @@ class OrphanResourcesAssessment(BaseAssessment):
                             d_id = d.get("id", "")
                             sku = d.get("sku", {}).get("name", "Standard_LRS")
                             size_gb = d.get("properties", {}).get("diskSizeGB", 128)
-                            monthly_price = PricingEngine.get_disk_monthly_price(sku, size_gb)
+                            pricing_price = PricingEngine.get_disk_monthly_price(sku, size_gb)
+                            norm_id = normalize_resource_id(d_id)
+                            cost_val = cost_map.get(norm_id, {}).get("cost")
+                            monthly_price = cost_val if cost_val is not None and cost_val > 0 else pricing_price
                             parsed = parse_azure_resource_id(d_id)
                             rg_name = parsed.get("resource_group") or "Unknown"
                             tags = d.get("tags") or {}
@@ -82,13 +96,14 @@ class OrphanResourcesAssessment(BaseAssessment):
                                     measured_value="ManagedBy property is null",
                                     recommended_configuration="Verify backup requirement and delete unattached disk",
                                     recommendation=f"Managed disk '{d_name}' is unattached to any VM and continues to incur storage charges.",
-                                    metric_period="Current configuration",
+                                    metric_period=f"Last Completed Month ({cost_month})",
                                     data_source="Microsoft.Compute Disks API",
                                     evidence={
                                         "managed_by": None,
                                         "sku": sku,
                                         "size_gb": size_gb,
                                         "actual_cost_mtd": round(monthly_price, 2),
+                                        "cost_month": cost_month,
                                         "environment": env_val,
                                         "orphan_reason": "Disk is not attached to any virtual machine"
                                     },

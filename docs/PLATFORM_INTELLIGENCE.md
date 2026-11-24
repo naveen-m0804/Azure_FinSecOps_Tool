@@ -1,9 +1,9 @@
 # Azure FinSecOps Platform - Assessment Intelligence & Evaluation Methodology Guide
 
-> **Document Version:** 2.0.0  
+> **Document Version:** 3.0.0  
 > **Target Audience:** Chief Information Security Officers (CISOs), FinOps Practitioners, Cloud Architects, and Enterprise Leadership  
 > **Author:** Principal Cloud Architect & Senior Project Delivery Manager  
-> **Scope:** Complete Technical Reference for all 33 Core Assessment Modules  
+> **Scope:** Complete Technical Reference for all 32 Core Assessment Modules (14 Security + 18 Cost)  
 
 ---
 
@@ -27,12 +27,12 @@ flowchart LR
     subgraph IntelligenceEngine["Core Platform Intelligence"]
         ProdFilter["Case-Insensitive Production Detection\n(is_production_resource)"]
         Deduplicator["Cross-Module Deduplication Engine\n(Confidence Weighting)"]
-        SecCalc["Secure Score Impact Engine\n(Current vs. Achievable)"]
+        SecCalc["Secure Score Engine\n(Defender ascScore & Control Breakdown)"]
         CostCalc["Defensible Savings Modeling\n(Strict Prohibition of MTD × 12)"]
     end
 
     subgraph BusinessOutput["Executive Deliverables"]
-        SecKPI["Current Security Score vs Achievable Score"]
+        SecKPI["Microsoft Defender Overall Secure Score"]
         CostKPI["Wastage, Monthly Savings & Annual Savings"]
         Reports["Landscape PDF & Multi-Tab Excel Deliverables"]
     end
@@ -45,23 +45,22 @@ flowchart LR
 
 ## 2. Core Mathematical & Deduplication Principles
 
-### 2.1 The Secure Score Improvement Model
-The platform models security posture based on Microsoft Defender for Cloud Secure Score standards:
-* **Current Security Score ($S_{\text{current}}$):** Weighted aggregate of passed security controls divided by total healthy + unhealthy control weights across active subscriptions:
+### 2.1 The Secure Score Evaluation Model
+The platform models security posture directly against Microsoft Defender for Cloud Secure Score standards:
+* **Current Security Score ($S_{\text{current}}$):** Weighted aggregate of passed security controls divided by total healthy + unhealthy control weights across active subscriptions fetched live via `Microsoft.Security/secureScores/ascScore`:
   $$S_{\text{current}} = \left( \frac{\sum \text{Healthy Control Scores}}{\sum \text{Total Control Weights}} \right) \times 100$$
-* **Control Security Potential ($\Delta S_i$):** Each identified finding exposes the exact percentage gain achievable by remediating that specific risk:
+* **Control Security Breakdown:** Each identified control exposes the exact percentage and potential score gain achievable by remediating that specific risk:
   $$\Delta S_i = \left( \frac{\text{Weight of Control } i}{\sum \text{Total Control Weights}} \right) \times 100$$
-* **Achievable Security Score ($S_{\text{achievable}}$):** Represents the post-remediation posture upon applying all automated architectural fixes:
-  $$S_{\text{achievable}} = \min\left(100.0\%,\ S_{\text{current}} + \sum \Delta S_i\right)$$
+* **Isolated Overall Secure Score Presentation:** The overall secure score is presented in a dedicated executive scorecard and standalone table row, cleanly decoupled from granular sub-control lists.
 
 ### 2.2 Defensible Cost Modeling vs. Naive "MTD $\times$ 12" Calculations
 A common failure of automated FinOps scripts is simply taking a resource's Month-to-Date (MTD) cost and multiplying it by 12. This creates inflated, indefensible estimates that fail financial audit. 
 
 The platform enforces **strict defensible savings modeling**:
-1. **Right-Sizing Delta Modeling (`COST-01`, `COST-14`):** When a virtual machine or database is underutilized, savings are modeled as the delta between the *Current SKU Rate* and the *Recommended Target SKU Rate* based on performance baselines.
-2. **Deallocation & Idle Off-Hours Modeling (`COST-08`, `COST-18`):** For non-production workloads running 24/7 without shutdown policies, savings represent the 128 off-peak weekly hours (evenings and weekends) where compute charges are eliminated:
+1. **Right-Sizing Delta Modeling (`COST-01`, `COST-10`):** When a virtual machine or database is underutilized, savings are modeled as the delta between the *Current SKU Rate* and the *Recommended Target SKU Rate* based on performance baselines.
+2. **Deallocation & Idle Off-Hours Modeling (`COST-08`, `COST-17`):** For non-production workloads running 24/7 without shutdown policies, savings represent the 128 off-peak weekly hours (evenings and weekends) where compute charges are eliminated:
    $$\text{Monthly Savings} = \text{Hourly VM Rate} \times 128\ \text{hours} \times 4.33\ \text{weeks}$$
-3. **Storage Tiering & Redundancy Delta (`COST-12`, `COST-19`):** Savings represent the difference between premium/redundant storage (e.g., GRS at \$0.045/GB) and standard local storage (LRS at \$0.019/GB).
+3. **Storage Tiering & Redundancy Delta (`COST-12`, `COST-18`):** Savings represent the difference between premium/redundant storage (e.g., GRS at \$0.045/GB) and standard local storage (LRS at \$0.019/GB).
 4. **Standard Display Format:** All cost savings are displayed as:
    $$\mathbf{\$X,XXX.XX\ \ (\$YY.YY/\text{month})}$$
 
@@ -90,50 +89,60 @@ SEC-07: Critical Attack Paths                SEC-14: Contributor RBAC Review
 ```
 
 ### [SEC-01] Subscription Security Score
-* **Core Intelligence:** Ingests Defender for Cloud Secure Score controls across all accessible subscriptions via `Microsoft.Security/secureScores`. Identifies gaps between subscription scores and enterprise targets.
-* **Calculation:** Identifies unhealthy controls and scores potential gain per subscription.
+* **Core Intelligence:** Ingests Defender for Cloud Secure Score controls across all accessible subscriptions via `Microsoft.Security/secureScores/ascScore` and `Microsoft.Security/secureScores/ascScore/secureScoreControls`.
+* **Isolated Score Presentation:** Displays the **"Microsoft Defender Overall Secure Score"** in a dedicated executive card and standalone table record, cleanly separated from individual controls.
+* **Calculation:** Identifies individual controls (e.g., *Restrict unauthorized network access*, *Remediate security configurations*, *Manage access and permissions*) and computes exact control scores, current percentages, and potential gain per subscription.
 * **Example Finding:**
   - *Resource:* `Subscription: Enterprise-Production-Global`
-  - *Current Score:* `64.2%` | *Target Score:* `100.0%`
-  - *Impact:* `+35.8% Secure Score Improvement`
-  - *Remediation:* Address top 3 failing controls: MFA enforcement, disk encryption, and log profile configuration.
+  - *Overall Score:* `64.2% (38.5 / 60.0 Max)`
+  - *Control:* `Restrict unauthorized network access` | *Current Score:* `75.0%` | *Potential Gain:* `+2.1%`
+  - *Remediation:* Address top failing sub-assessments across NSGs and endpoints.
 
 ### [SEC-02] New Security Recommendations
-* **Core Intelligence:** Queries `Microsoft.Security/assessments` for newly generated recommendations within the last 14 days that have not been remediated.
-* **Calculation:** Filters by `status.code == 'Unhealthy'`, capturing recommendations added during the current evaluation cycle.
+* **Core Intelligence:** Queries `Microsoft.Security/assessments` for new recommendations detected within the **last 30 days** that remain unresolved (`Unhealthy` or `Open`).
+* **Calculation:** Evaluates `status.firstEvaluationDate`, cleanly parsing ISO 8601 timestamps into dynamic `YYYY-MM-DD` First Detected Dates.
 * **Example Finding:**
   - *Resource:* `storage-app-eastus-01` (`Microsoft.Storage/storageAccounts`)
   - *Recommendation:* `Public network access on storage accounts should be disabled`
+  - *First Detected Date:* `2026-11-04` | *Status:* `Unhealthy (Active)`
   - *Severity:* `High` | *Score Impact:* `+2.4%`
 
 ### [SEC-03] Production Resources Missing Diagnostic Logs
-* **Core Intelligence:** Interrogates Azure Monitor Diagnostic Settings (`Microsoft.Insights/diagnosticSettings`) for production workloads. Flags any production Virtual Machine, SQL Database, Key Vault, or Application Gateway lacking active log forwarding to Log Analytics.
-* **Calculation:** Identifies active resources where `diagnosticSettings.value.length == 0` or essential log categories are disabled.
+* **Core Intelligence:** Interrogates Azure Monitor Diagnostic Settings (`Microsoft.Insights/diagnosticSettings`) across critical cloud workloads.
+* **Comprehensive Resource Audit Scope:**
+  - **Logic Apps:** Diagnostic logs in Logic Apps (`microsoft.logic/workflows`) should be enabled.
+  - **Key Vault:** Diagnostic logs in Key Vault (`microsoft.keyvault/vaults`) should be enabled.
+  - **App Service:** Diagnostic logs in App Service (`microsoft.web/sites`) should be enabled.
+  - **Microsoft Foundry:** Diagnostic logs in Foundry resources (`cognitiveservices`, `machinelearningservices`, `aistudio`) should be enabled.
+  - **Kubernetes:** Diagnostic logs in Kubernetes services (`managedclusters`) should be enabled.
+* **Calculation:** Identifies active resources where diagnostic settings are absent, log categories are disabled, or no Log Analytics Workspace target is configured.
 * **Example Finding:**
-  - *Resource:* `sql-prod-customer-db` (`Microsoft.Sql/servers/databases`)
-  - *Status:* `Missing Diagnostic Configuration`
-  - *Remediation:* Create diagnostic setting forwarding `SQLSecurityAuditEvents` to centralized Log Analytics Workspace `law-corp-audit`.
+  - *Resource:* `kv-corp-production-01` (`Microsoft.KeyVault/vaults`)
+  - *Status:* `Diagnostic logs in Key Vault should be enabled`
+  - *Remediation:* Forward `AuditEvent` logs to centralized Log Analytics Workspace.
 
 ### [SEC-04] High Priority Security Recommendations
-* **Core Intelligence:** Evaluates Defender for Cloud recommendations tagged with `High` severity that directly expose resources to external lateral movement or credential compromise.
-* **Calculation:** Prioritizes recommendations where severity is `High` and remediation SLA has exceeded 30 days.
+* **Core Intelligence:** Leverages KQL queries via Azure Resource Graph (`securityresources`) with resilient fallback to `Microsoft.Security/assessments`, strictly filtered to **High** severity matching the Azure Portal Microsoft Defender for Cloud Recommendations blade.
+* **Dynamic Target Resolution:** Strips `/providers/Microsoft.Security/assessments/.*` tails to accurately resolve the true target resource, real resource group, and actual resource name (avoiding erroneous subscription-scope fallbacks).
+* **Metadata Cache Enrichment:** Dynamically populates **Description**, **Azure Remediation**, **Recommendation**, and **Related Security Control** using live Azure assessment metadata without static or hardcoded placeholders.
 * **Example Finding:**
-  - *Resource:* `vm-web-frontend-01`
+  - *Resource:* `vm-web-frontend-01` (`Microsoft.Compute/virtualMachines`)
   - *Recommendation:* `Management ports should be closed (RDP 3389 / SSH 22 exposed to 0.0.0.0/0)`
-  - *Score Impact:* `+4.8%`
+  - *Severity:* `High` | *Security Control:* `Restrict unauthorized network access`
+  - *Remediation:* Restrict inbound traffic using Network Security Groups or Azure Bastion.
 
 ### [SEC-05] Azure Service Retirement & Runtime Deprecation
-* **Core Intelligence:** Queries Azure Resource Graph and Advisor for services, operating system runtimes, or API versions scheduled for retirement by Microsoft within the next 180 days.
-* **Calculation:** Flags resources where runtime version (e.g., Node.js 16, Python 3.8, PHP 8.0) is past End-of-Life (EOL).
+* **Core Intelligence:** Queries official Azure Advisor Service Upgrade & Retirement advisories and live Azure Service Health events (`Microsoft.ResourceHealth/events`), eliminating synthetic scans over standard infrastructure.
+* **Protocol & Stack Deprecation:** Continuously monitors retirement notices, including deprecated TLS / TLC security protocols and officially retired legacy platform architectures.
 * **Example Finding:**
-  - *Resource:* `app-order-processing` (`Microsoft.Web/sites`)
-  - *Configured Runtime:* `Node 16 LTS (End-of-Life)`
-  - *Retirement Date:* `2024-09-11` | *Status:* `Deprecation Critical`
-  - *Remediation:* Upgrade App Service stack runtime configuration to Node.js 20 LTS.
+  - *Resource:* `pg-legacy-prod` (`Microsoft.DBforPostgreSQL/servers`)
+  - *Retirement Notice:* `Azure Database for PostgreSQL - Single Server retired`
+  - *Status:* `Service Retired`
+  - *Remediation:* Migrate to Azure Database for PostgreSQL Flexible Server.
 
 ### [SEC-06] High Security Alerts
-* **Core Intelligence:** Queries `Microsoft.Security/alerts` for unresolved alerts with severity `High`.
-* **Calculation:** Detects active brute force, malware execution, unusual credential escalation, or suspicious data egress patterns.
+* **Core Intelligence:** Queries `Microsoft.Security/alerts` for unresolved alerts with severity `High` or `Critical`.
+* **Calculation:** Extracts attacker MITRE ATT&CK tactics, techniques, compromised entities, and remediation instructions.
 * **Example Finding:**
   - *Resource:* `vm-db-connector-01`
   - *Alert Name:* `Suspicious process execution detected via PowerShell`
@@ -141,67 +150,68 @@ SEC-07: Critical Attack Paths                SEC-14: Contributor RBAC Review
   - *Status:* `Active (Unresolved)`
 
 ### [SEC-07] Critical Cloud Attack Paths
-* **Core Intelligence:** Evaluates Defender for Cloud Cloud Security Graph Attack Path engine (`Microsoft.Security/attackPaths`). Analyzes multi-hop vulnerability chains connecting internet entry points to high-value assets.
-* **Calculation:** Identifies reachability graph where entry point has public IP $\rightarrow$ known CVE $\rightarrow$ Key Vault secret $\rightarrow$ database access.
+* **Core Intelligence:** Evaluates Defender for Cloud Cloud Security Graph Attack Path engine (`Microsoft.Security/attackPaths`) via Azure Resource Graph.
+* **Calculation:** Analyzes multi-hop vulnerability chains connecting internet entry points to high-value assets and presents break-the-chain remediation.
 * **Example Finding:**
   - *Resource:* `vm-dmz-proxy` $\rightarrow$ `kv-prod-secrets` $\rightarrow$ `sqldb-orders`
   - *Attack Path:* `Internet-exposed VM with high-severity vulnerability has managed identity with Key Vault Reader permissions`
   - *Risk Level:* `Critical` | *Remediation:* Remove unneeded role assignment from VM Managed Identity.
 
 ### [SEC-08] Virtual Machine Operating System Version
-* **Core Intelligence:** Queries compute instance OS profile (`osProfile`) and guest extensions to verify operating system build levels against vendor support matrices.
-* **Calculation:** Flags Windows Server 2012 R2, Ubuntu 18.04 LTS, or CentOS 7 instances past vendor mainstream support.
+* **Core Intelligence:** Queries compute instance OS profile (`osProfile`) and guest extensions (`instanceView`) to evaluate operating system versions against a modern **2025 baseline**.
+* **Modern 2025 Baseline Evaluation:** Any Windows Server release prior to 2025 (2022, 2019, 2016, 2012, 2008) or Linux distribution releases prior to 2025 (Ubuntu <= 24.04 LTS, CentOS, RHEL <= 9) are flagged.
+* **Streamlined Columns:** Populates the 8 clean columns: **Subscription Name**, **Resource Group Name**, **Virtual Machine Name**, **Region**, **Operating System**, **OS Version**, **OS Build** (dynamically resolved from instanceView and SKU mappings), and **Publisher** (omits redundant Image Version "latest" and support date columns).
 * **Example Finding:**
-  - *Resource:* `vm-legacy-app-02`
-  - *OS Version:* `Windows Server 2012 R2 Standard (Build 9600)`
-  - *Support Status:* `End-of-Support (EOS) - High Risk`
-  - *Remediation:* Migrate workload to Windows Server 2022 or apply Azure Extended Security Updates (ESU).
+  - *Virtual Machine:* `vm-legacy-app-02`
+  - *Operating System:* `Windows Server 2022 Datacenter` | *OS Version:* `21H2` | *OS Build:* `20348`
+  - *Publisher:* `MicrosoftWindowsServer`
 
 ### [SEC-09] VM Patching & Missing Security Updates
-* **Core Intelligence:** Interfaces with Azure Update Manager (`Microsoft.Compute/virtualMachines/assessPatches`) to retrieve pending security and critical patch counts.
+* **Core Intelligence:** Interfaces with Azure Update Manager (`Microsoft.Compute/virtualMachines/patchAssessmentResults/latest`) to retrieve pending security and critical patch counts.
 * **Calculation:** Identifies VMs with missing security updates $> 5$ or critical patches $> 0$.
 * **Example Finding:**
   - *Resource:* `vm-batch-worker-01`
   - *Missing Security Updates:* `14` | *Missing Critical Updates:* `6`
   - *Reboot Required:* `Yes` | *Status:* `Non-Compliant`
 
-### [SEC-10] Software Version Upgrades & Vulnerabilities
-* **Core Intelligence:** Analyzes software inventory installed within guest virtual machines detected via Microsoft Defender for Endpoint.
-* **Calculation:** Compares installed software version numbers against known CVE vulnerability catalogs.
+### [SEC-10] Outdated Software Versions on Azure Virtual Machines
+* **Core Intelligence:** Queries Defender Vulnerability Management subassessments on virtual machines.
+* **"Update" Keyword Filtering:** Filters strictly to items whose recommendation or package name starts with `"Update"` to focus exclusively on actionable software package upgrades.
 * **Example Finding:**
   - *Resource:* `vm-web-cluster-03`
-  - *Software Name:* `OpenSSL 1.1.1t`
-  - *Recommended Version:* `OpenSSL 3.0.12+`
-  - *Severity:* `High (Known RCE vulnerability)`
+  - *Recommendation:* `Update OpenSSL on Linux virtual machines`
+  - *Affected Software:* `OpenSSL 1.1.1t` $\rightarrow$ `Update to 3.0.12+`
+  - *Severity:* `High`
 
-### [SEC-11] Managed Disk Encryption (ADE / CMEK)
-* **Core Intelligence:** Inspects disk properties for `encryption.type` and `encryptionSettingsCollection`. Detects disks using only platform-managed keys (PMK) where customer-managed encryption (CMEK) or encryption-at-host is mandatory.
-* **Calculation:** Flags any OS or data disk where `encryptionType == 'EncryptionAtRestWithPlatformKey'` and enterprise policy mandates `CustomerManagedKey`.
+### [SEC-11] Managed Disk Encryption Configuration Gaps
+* **Core Intelligence:** Inspects disk properties for `encryption.type` and Customer-Managed Keys (CMK) / Azure Disk Encryption (ADE).
+* **Dynamic Host Encryption Check:** Interrogates attached virtual machines dynamically to resolve live `securityProfile.encryptionAtHost` status rather than assuming disabled.
 * **Example Finding:**
   - *Resource:* `disk-prod-database-data` (`Microsoft.Compute/disks`)
   - *Encryption Type:* `PMK (Platform-Managed Key Only)`
-  - *Score Impact:* `+3.2%`
-  - *Remediation:* Attach Disk Encryption Set backed by Azure Key Vault HSM CMEK.
+  - *Encryption at Host Status:* `Disabled`
+  - *Remediation:* Enable host-based encryption or attach Disk Encryption Set backed by Azure Key Vault HSM.
 
-### [SEC-12] Transport Layer Security (TLS) Version Enforcement
-* **Core Intelligence:** Queries App Services, Storage Accounts, SQL Databases, and API Gateways for minimum allowed TLS protocol versions.
-* **Calculation:** Evaluates `minimumTlsVersion` and flags services allowing legacy `TLS 1.0` or `TLS 1.1`.
+### [SEC-12] Azure Services Using Insecure TLS Configurations
+* **Core Intelligence:** Audits App Services, Storage Accounts, SQL Servers, and Cosmos DB for minimum allowed TLS protocol versions.
+* **Calculation:** Identifies resources configured with `minimumTlsVersion` below `TLS1_2`.
 * **Example Finding:**
   - *Resource:* `saecommerceassets` (`Microsoft.Storage/storageAccounts`)
   - *Configured TLS:* `TLS 1.0` | *Required Standard:* `TLS 1.2+`
   - *Remediation:* Enforce `minimumTlsVersion = 'TLS1_2'` via ARM configuration.
 
-### [SEC-13] Key Vault RBAC Migration
-* **Core Intelligence:** Evaluates Azure Key Vault authorization models (`enableRbacAuthorization`). Detects legacy access policies that lack fine-grained, auditable access boundaries.
-* **Calculation:** Flags Key Vaults where `enableRbacAuthorization == false`.
+### [SEC-13] Azure Key Vaults Using Access Policy Authorization
+* **Core Intelligence:** Evaluates Key Vault authorization models (`enableRbacAuthorization`).
+* **Live IAM Verification:** Dynamically queries Azure IAM (`Microsoft.Authorization/roleAssignments`) at the vault scope to report real role assignment counts and assigned role names, recommending migration from legacy access policies.
 * **Example Finding:**
   - *Resource:* `kv-corporate-keys-01`
   - *Authorization Model:* `Vault Access Policy (Legacy)`
+  - *IAM Role Assignments:* `3 active assignments`
   - *Remediation:* Transition vault authorization to Azure Role-Based Access Control (`Key Vault Secrets User`, `Key Vault Crypto Officer`).
 
-### [SEC-14] Contributor RBAC Excessive Permissions Review
-* **Core Intelligence:** Analyzes role assignments (`Microsoft.Authorization/roleAssignments`) at subscription and resource group scopes to identify over-privileged human or service principal identities.
-* **Calculation:** Flags non-administrative users assigned direct `Contributor` or `Owner` permissions without PIM (Privileged Identity Management) justification.
+### [SEC-14] Azure Contributor Role Assignments Requiring Review
+* **Core Intelligence:** Analyzes role assignments (`Microsoft.Authorization/roleAssignments`) at subscription and resource group scopes.
+* **Strict Contributor Scope:** Filters strictly to **Contributor assignments only** (excluding Owner and custom roles) to enforce least-privilege principles and flag direct human user assignments.
 * **Example Finding:**
   - *Resource:* `Assignment: user-contractor@corp.com`
   - *Role Assigned:* `Contributor (Subscription Scope)`
@@ -209,19 +219,18 @@ SEC-07: Critical Attack Paths                SEC-14: Contributor RBAC Review
 
 ---
 
-## 4. Pillar 2: Financial Optimization & Savings (19 Modules)
+## 4. Pillar 2: Financial Optimization & Savings (18 Modules)
 
 ```
-COST-01: Underutilized Virtual Machines         COST-11: New & Unused Resources
-COST-02: Orphan & Unattached Cloud Resources   COST-12: Storage Account Lifecycle Policy
-COST-03: Underutilized Managed Data Disks      COST-13: Database Storage vs Allocation
-COST-04: Underutilized OS Disks                COST-14: Database Compute & SKU Optimization
-COST-05: Monthly Billing Cost Comparison       COST-15: Backup Retention Cost Alignment
-COST-06: Top 20 Optimization Opportunities     COST-16: Stale Disk Snapshots
-COST-07: VM Licensing & Hybrid Benefit (AHB)   COST-17: Function App Hosting Plans
-COST-08: VM Auto-Shutdown Enforcement          COST-18: VM Auto-Start Off-Hours Impact
-COST-09: Managed Disk Capacity Alerts          COST-19: Non-LRS Storage in Test Environments
-COST-10: Database Performance Thresholds
+COST-01: Underutilized Virtual Machines         COST-10: Database Performance Thresholds
+COST-02: Orphan & Unattached Cloud Resources   COST-11: New & Unused Resources
+COST-03: Underutilized Managed Data Disks      COST-12: Storage Account Lifecycle Policy
+COST-04: Underutilized OS Disks                COST-13: Database Storage vs Allocation
+COST-05: Monthly Billing Cost Comparison       COST-14: Backup Policy & Retention Alignment
+COST-06: Top 20 Optimization Opportunities     COST-15: Stale Disk Snapshots
+COST-07: VM Licensing & Hybrid Benefit (AHB)   COST-16: Function App Hosting Plans
+COST-08: VM Auto-Shutdown Enforcement          COST-17: VM Auto-Start Off-Hours Impact
+COST-09: Managed Disk Capacity Alerts          COST-18: Non-LRS Storage Redundancy Optimization
 ```
 
 ### [COST-01] Underutilized Virtual Machines
@@ -353,17 +362,7 @@ COST-10: Database Performance Thresholds
   - *Recommendation:* Shrink database and reduce allocated storage cap to 200 GB
   - *Savings:* **\$1,440.00 ($120.00/month)**
 
-### [COST-14] Database Compute & SKU Optimization
-* **Data Sources:** Azure Database pricing catalog cross-referenced against core utilization across SQL Managed Instances and Azure Cosmos DB provisioned throughput.
-* **Detection Criteria:** High-tier Business Critical instances running with single-digit CPU loads that can comfortably transition to General Purpose tier without latency degradation.
-* **Formula:** Delta between Business Critical vCore rate and General Purpose vCore rate.
-* **Example Finding:**
-  - *Database:* `sqldb-ecommerce-catalog` (Business Critical Gen5 8 vCores at \$2,880/mo)
-  - *Average CPU:* `2.4%` | *IOPS:* `Low latency read-heavy`
-  - *Recommendation:* Transition to General Purpose Gen5 8 vCores (\$1,440/mo)
-  - *Savings:* **\$17,280.00 ($1,440.00/month)**
-
-### [COST-15] Azure Backup Policy & Retention Cost Alignment
+### [COST-14] Azure Backup Policy & Retention Cost Alignment
 * **Data Sources:** Recovery Services Vaults (`Microsoft.RecoveryServices/vaults`) and Backup Policies (`backupPolicies`).
 * **Detection Criteria:** Virtual machines or databases backed up under aggressive multi-year retention policies (e.g., 3650-day retention) on secondary non-critical workloads where compliance mandates only 30-day retention.
 * **Formula:** Redundant backup storage consumption reduction.
@@ -373,7 +372,7 @@ COST-10: Database Performance Thresholds
   - *Storage Consumed:* `4.2 TB GRS Vault Storage`
   - *Savings:* **\$2,232.00 ($186.00/month)**
 
-### [COST-16] Aged & Stale Managed Disk Snapshots
+### [COST-15] Aged & Stale Managed Disk Snapshots
 * **Data Sources:** Azure Compute snapshot listings (`Microsoft.Compute/snapshots`).
 * **Detection Criteria:** Disk snapshots older than 90 days that are unlinked from active disaster recovery policies or where the parent disk has already been deleted.
 * **Formula:** Total snapshot GB storage rate elimination:
@@ -384,7 +383,7 @@ COST-10: Database Performance Thresholds
   - *Recommendation:* Delete orphaned snapshot
   - *Savings:* **\$307.20 ($25.60/month)**
 
-### [COST-17] Function App Execution Frequency & Hosting Plan
+### [COST-16] Function App Execution Frequency & Hosting Plan
 * **Data Sources:** Azure Monitor metric `FunctionExecutionCount` and `FunctionExecutionUnits` cross-referenced with App Service Plan hosting SKU.
 * **Detection Criteria:** Serverless Function Apps hosted on dedicated App Service Plans (Basic, Standard, or Premium P1v3 costing \$70–\$150/mo) executing fewer than 500 times per month.
 * **Formula:** Delta between dedicated App Service Plan hosting and pure Consumption Plan pricing:
@@ -395,7 +394,7 @@ COST-10: Database Performance Thresholds
   - *Recommendation:* Migrate to Consumption Serverless Plan (Free tier covers $< 1\text{M}$ executions)
   - *Savings:* **\$870.00 ($72.50/month)**
 
-### [COST-18] VM Auto-Start Schedule & Off-Hours Impact
+### [COST-17] VM Auto-Start Schedule & Off-Hours Impact
 * **Data Sources:** Azure Automation Runbooks, Logic Apps, and Scheduled Tasks configuring VM startup.
 * **Detection Criteria:** Non-production virtual machines configured with automated start tasks triggering daily at 06:00, including Saturday and Sunday, where workloads remain idle during weekend windows.
 * **Formula:** Eliminates 32 unutilized weekend operational hours:
@@ -406,7 +405,7 @@ COST-10: Database Performance Thresholds
   - *Recommendation:* Update cron trigger to execute strictly Monday through Friday
   - *Savings:* **\$387.00 ($32.25/month)**
 
-### [COST-19] Non-LRS Storage Redundancy in Test Environments
+### [COST-18] Non-LRS Storage Redundancy Optimization
 * **Data Sources:** Storage Account resource model (`sku.name`).
 * **Detection Criteria:** Storage accounts located in verified non-production or test environments configured with high-cost geo-redundant storage (GRS) or read-access geo-redundant storage (RA-GRS) instead of standard locally redundant storage (LRS).
 * **Formula:** Cost delta between GRS (\$0.045/GB) and LRS (\$0.019/GB):
@@ -421,11 +420,11 @@ COST-10: Database Performance Thresholds
 
 ## 5. Summary of Platform Executive Deliverables
 
-All 33 assessment modules feed directly into executive presentation outputs:
+All 32 assessment modules feed directly into executive presentation outputs:
 1. **Interactive Real-Time Single-Page Application:**
-   - 6 KPI Scorecards: Total Subscriptions, Current Security Score, Achievable Security Score, Current Cost Wastage, Monthly Savings, and Annual Savings.
+   - 6 KPI Scorecards: Total Subscriptions, Microsoft Defender Overall Secure Score, Total Critical / High Security Risks, Current Cost Wastage, Monthly Savings, and Annual Savings.
    - Dynamic currency rendering matching the evaluated tenant.
-   - Instant search filtering and deep-dive finding modals for all 33 modules.
+   - Instant search filtering and deep-dive finding modals for all 32 modules.
 2. **Landscape Boardroom PDF Deliverable:**
    - Formatted in landscape Letter with 752 pt printable width.
    - Includes full executive status matrix, risk rankings, and exact assessment-specific finding tables.

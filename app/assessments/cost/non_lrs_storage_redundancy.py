@@ -20,7 +20,7 @@ REDUNDANCY_SAVINGS_MAP = {
 
 class NonLrsStorageRedundancyAssessment(BaseAssessment):
     assessment_id = "non_lrs_storage_redundancy"
-    code = "COST-19"
+    code = "COST-18"
     category = "cost"
     name = "Non-LRS Storage Redundancy Optimization"
     description = "Identify storage accounts configured with expensive multi-zone or geo-redundant storage (ZRS, GRS, RA-GRS, GZRS, RA-GZRS) matching user-provided evaluation tags or non-production scopes instead of Locally Redundant Storage (LRS)."
@@ -39,14 +39,14 @@ class NonLrsStorageRedundancyAssessment(BaseAssessment):
         findings: List[FindingModel] = []
         errors: List[str] = []
         resources_evaluated = 0
-        mtd_start, mtd_end = get_current_month_to_date()
+        cost_start, cost_end, cost_month = CostManagementAdapter.get_last_completed_month_date_range()
 
         for sub in context.subscriptions:
             cost_map = await CostManagementAdapter.query_resource_costs(
                 context.client,
                 subscription_id=sub.subscription_id,
-                start_date=mtd_start,
-                end_date=mtd_end,
+                start_date=cost_start,
+                end_date=cost_end,
                 resource_type_filter="Microsoft.Storage/storageAccounts"
             )
 
@@ -155,7 +155,7 @@ class NonLrsStorageRedundancyAssessment(BaseAssessment):
                         measured_value=f"Configured with {current_redundancy} in test environment",
                         recommended_configuration="Migrate storage account redundancy to LRS (Locally Redundant Storage)",
                         recommendation=f"Storage account '{sa_name}' is deployed in test environment '{env_val}' with {current_redundancy} redundancy. Convert to LRS to reduce recurring replication cost.",
-                        metric_period=f"{mtd_start} to {mtd_end} (MTD)",
+                        metric_period=f"Last Completed Month ({cost_month})",
                         data_source="Azure Storage Accounts API & Cost Management Query API",
                         evidence={
                             "environment": env_val,
@@ -163,7 +163,8 @@ class NonLrsStorageRedundancyAssessment(BaseAssessment):
                             "required_redundancy": "LRS",
                             "sku_name": sku_name,
                             "actual_cost_mtd": round(cost_val, 2),
-                            "savings_pct": f"{int(savings_pct * 100)}%"
+                            "savings_pct": f"{int(savings_pct * 100)}%",
+                            "cost_month": cost_month
                         },
                         current_monthly_cost=round(cost_val, 2),
                         estimated_monthly_savings=est_monthly_saving,

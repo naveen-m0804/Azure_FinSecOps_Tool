@@ -12,11 +12,11 @@ from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_i
 
 class OldSnapshotsAssessment(BaseAssessment):
     assessment_id = "old_snapshots"
-    code = "COST-16"
+    code = "COST-15"
     category = "cost"
     name = "Old Snapshot Expired"
     description = "Identify managed disk snapshots older than 365 days and cross-reference with last month's actual storage cost."
-    purpose = "Detect obsolete point-in-time snapshots that have exceeded reasonable retention thresholds."
+    purpose = "Detect obsolete point-in-time snapshots that have exceeded reasonable retention thresholds (>365 days)."
     required_permissions = [
         "Microsoft.Compute/snapshots/read",
         "Microsoft.CostManagement/query/action",
@@ -29,19 +29,17 @@ class OldSnapshotsAssessment(BaseAssessment):
         start_t = time.time()
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-        
         findings: List[FindingModel] = []
         errors: List[str] = []
         resources_evaluated = 0
-        cutoff_dt = get_cutoff_date(days=365)
-        prev_start, prev_end = get_previous_calendar_month()
+        cost_start, cost_end, cost_month = CostManagementAdapter.get_last_completed_month_date_range()
 
         for sub in context.subscriptions:
             cost_map = await CostManagementAdapter.query_resource_costs(
                 context.client,
                 subscription_id=sub.subscription_id,
-                start_date=prev_start,
-                end_date=prev_end,
+                start_date=cost_start,
+                end_date=cost_end,
                 resource_type_filter="Microsoft.Compute/snapshots"
             )
 
@@ -63,9 +61,14 @@ class OldSnapshotsAssessment(BaseAssessment):
 
                 age_days = (datetime.datetime.now(datetime.timezone.utc) - time_created).days
 
-                # Flag snapshots older than 365 days as in old_snapshots_alert.txt
+                # Flag snapshots older than 365 days as per requirements (> 365 days)
                 if age_days > 365:
-                    size_gb = props.get("diskSizeGB", 128)
+                    size_gb = props.get("diskSizeGB")
+                    if size_gb is None and props.get("diskSizeBytes"):
+                        size_gb = round(props.get("diskSizeBytes") / (1024 ** 3), 1)
+                    if not size_gb:
+                        size_gb = 128
+
                     incremental = props.get("incremental", False)
                     norm_id = normalize_resource_id(snap_id)
                     cost_info = cost_map.get(norm_id, {})
@@ -77,9 +80,33 @@ class OldSnapshotsAssessment(BaseAssessment):
                     savings_type = "Actual Cost" if (actual_cost is not None and actual_cost > 0) else "Estimated Savings"
                     parsed = parse_azure_resource_id(snap_id)
 
+                    # Extract source disk from creationData if available
+                    creation_data = props.get("creationData", {})
+                    source_res_id = (
+                        creation_data.get("sourceResourceId")
+                        or creation_data.get("sourceUri")
+                        or props.get("sourceResourceId")
+                        or ""
+                    )
+                    source_disk = "--"
+                    if source_res_id:
+                        source_disk = source_res_id.split("/")[-1]
+                        if source_disk.lower().endswith(".vhd"):
+                            source_disk = source_disk[:-4]
+                    else:
+                        tags = snap.get("tags") or {}
+                        source_disk = (
+                            tags.get("sourceDisk")
+                            or tags.get("SourceDisk")
+                            or tags.get("source")
+                            or tags.get("Source")
+                            or tags.get("DiskName")
+                            or "Standalone Disk"
+                        )
+
                     findings.append(
                         FindingModel(
-                            finding_id=f"cost16-{snap_name[:12]}",
+                            finding_id=f"cost15-{snap_name[:12]}",
                             assessment_id=self.assessment_id,
                             category=self.category,
                             subscription_id=sub.subscription_id,
@@ -91,19 +118,23 @@ class OldSnapshotsAssessment(BaseAssessment):
                             region=snap.get("location", "global"),
                             severity="Medium",
                             status="Expired Retention (>365d)",
-                            current_configuration=f"Age: {age_days} days | Size: {size_gb} GB | Incremental: {incremental}",
-                            measured_value=f"Snapshot age is {age_days} days (Created: {time_created.strftime('%Y-%m-%d')})",
+                            current_configuration=f"Source Disk: {source_disk} | Size: {size_gb} GiB | Created: {time_created.strftime('%Y-%m-%d')} ({age_days} days ago)",
+                            measured_value=f"Snapshot age is {age_days} days (> 365 days threshold, Created: {time_created.strftime('%Y-%m-%d')})",
                             recommended_configuration="Verify compliance requirement and delete expired snapshot",
-                            recommendation=f"Snapshot '{snap_name}' was created {age_days} days ago and exceeds standard retention policy.",
-                            metric_period=f"Previous calendar month ({prev_start} to {prev_end})",
+                            recommendation=f"Snapshot '{snap_name}' created from source disk '{source_disk}' is {age_days} days old and exceeds standard 365-day retention. Delete expired snapshot to eliminate ongoing storage costs.",
+                            metric_period=f"Last Completed Month ({cost_month})",
                             data_source="Microsoft.Compute Snapshots & Cost Management API",
                             evidence={
+                                "source_disk": source_disk,
+                                "source_resource_id": source_res_id,
                                 "age_days": age_days,
                                 "size_gb": size_gb,
+                                "disk_size_gb": size_gb,
                                 "incremental": incremental,
                                 "created_date": time_created.strftime("%Y-%m-%d"),
                                 "previous_month_actual_cost": actual_cost,
-                                "actual_cost_mtd": round(monthly_price, 2)
+                                "actual_cost_mtd": round(monthly_price, 2),
+                                "cost_month": cost_month
                             },
                             current_monthly_cost=round(monthly_price, 2),
                             estimated_monthly_savings=round(monthly_price, 2),

@@ -53,7 +53,6 @@ def generate_security_excel(job_data: Dict[str, Any], workspace_name: str, tenan
         ("Medium Severity Findings", sec_counts.get("Medium", 0)),
         ("Low Severity Findings", sec_counts.get("Low", 0)),
         ("Current Posture Score", sec_score_str),
-        ("Achievable Posture Score", achievable_str),
         ("Subscriptions Scanned", subs_count),
     ]
 
@@ -164,25 +163,60 @@ def generate_security_excel(job_data: Dict[str, Any], workspace_name: str, tenan
 
         ws = wb.create_sheet(title=sheet_title)
         ws.views.sheetView[0].showGridLines = True
-        ws.freeze_panes = "A2"
+
+        overall_findings = []
+        table_findings = findings
+        if ass.assessment_id in ("subscription_security_score", "secure_score"):
+            overall_findings = [
+                f for f in findings
+                if (getattr(f, "resource_name", "") == "Microsoft Defender Overall Secure Score"
+                    or getattr(f, "finding_id", "").endswith("-ascScore"))
+            ]
+            table_findings = [f for f in findings if f not in overall_findings]
+
+        start_row = 1
+        if overall_findings:
+            ws.cell(row=1, column=1, value="Microsoft Defender Overall Secure Score").font = FONT_TITLE
+            ov_headers = ["Subscription Name", "Overall Secure Score", "Posture Status", "Remediation Guidance"]
+            for col_idx, h in enumerate(ov_headers, start=1):
+                cell = ws.cell(row=2, column=col_idx, value=h)
+                cell.font = FONT_HEADER
+                cell.fill = FILL_PURPLE_HEADER
+                cell.alignment = ALIGN_LEFT
+                cell.border = BORDER_BOX
+            for o_idx, of in enumerate(overall_findings, start=3):
+                score_val = of.measured_value or (f"{of.evidence.get('percentage')}%" if of.evidence.get('percentage') is not None else "--")
+                c1 = ws.cell(row=o_idx, column=1, value=of.subscription_name)
+                c2 = ws.cell(row=o_idx, column=2, value=score_val)
+                c3 = ws.cell(row=o_idx, column=3, value=of.status)
+                c4 = ws.cell(row=o_idx, column=4, value=of.recommended_configuration or of.recommendation or "--")
+                for c in (c1, c2, c3, c4):
+                    c.font = FONT_BOLD if c in (c1, c2) else FONT_BODY
+                    c.border = BORDER_BOX
+                    c.alignment = ALIGN_LEFT
+            start_row = len(overall_findings) + 5
+            ws.cell(row=start_row - 1, column=1, value="Security Controls Breakdown").font = FONT_TITLE
+
+        ws.freeze_panes = f"A{start_row + 1}"
 
         # Headers
         for col_idx, h in enumerate(columns, start=1):
-            cell = ws.cell(row=1, column=col_idx, value=h)
+            cell = ws.cell(row=start_row, column=col_idx, value=h)
             cell.font = FONT_HEADER
             cell.fill = FILL_PURPLE_HEADER
             cell.alignment = ALIGN_LEFT
             cell.border = BORDER_BOX
 
         # Data rows (Only affected resources / security gaps)
-        for row_idx, f in enumerate(findings, start=2):
+        for offset, f in enumerate(table_findings, start=1):
+            row_idx = start_row + offset
             row_vals = extract_security_finding_row(ass.assessment_id, f)
             for col_idx, val in enumerate(row_vals, start=1):
                 cell = ws.cell(row=row_idx, column=col_idx, value=val)
                 cell.font = FONT_BODY
                 cell.border = BORDER_BOX
                 cell.alignment = ALIGN_WRAP
-                if row_idx % 2 == 0:
+                if offset % 2 == 0:
                     cell.fill = FILL_ZEBRA
 
         # Auto-fit column widths with readable padding

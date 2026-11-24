@@ -9,6 +9,11 @@ Updated:
 """
 
 from typing import Dict, Any, List, Optional
+from app.azure.cost_management import CostManagementAdapter
+from app.utils.resource_ids import parse_azure_resource_id
+
+_, _, COST_MONTH_LABEL = CostManagementAdapter.get_last_completed_month_date_range()
+COST_HEADER = f"Cost ({COST_MONTH_LABEL})"
 
 CURRENCY_SYMBOLS: Dict[str, str] = {
     "USD": "$",
@@ -62,7 +67,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "VM Size",
             "CPU Utilization",
             "Memory Utilization",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [105, 95, 85, 75, 82, 75, 75, 80, 80],  # 752 pt
@@ -90,7 +95,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Resource Group",
             "Environment",
             "Resource Status",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [120, 105, 95, 85, 75, 112, 80, 80],  # 752 pt
@@ -119,7 +124,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Disk Tier",
             "Disk Size",
             "IOPS Utilization",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [95, 85, 85, 75, 62, 75, 55, 80, 70, 70],  # 752 pt
@@ -129,10 +134,10 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.subscription_name,
             f.resource_group or "--",
             f.evidence.get("environment") or "Production",
-            f.evidence.get("disk_tier") or f.evidence.get("tier") or "Premium SSD P30",
-            f"{f.evidence.get('disk_size_gb', 1024)} GiB",
-            f.measured_value or f.evidence.get("iops_utilization") or f"Avg {f.evidence.get('avg_iops', 12)} IOPS",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 135.17), f.currency),
+            f.evidence.get("disk_tier") or f.evidence.get("tier") or "--",
+            f"{f.evidence.get('disk_size_gb')} GiB" if f.evidence.get('disk_size_gb') is not None else "--",
+            f.measured_value or f.evidence.get("iops_utilization") or "0.00%",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
@@ -149,19 +154,21 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Environment",
             "Disk Tier",
             "Disk Size",
-            "Cost",
+            "IOPS Utilization",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
-        "col_widths": [115, 95, 95, 85, 67, 85, 60, 75, 75],  # 752 pt
+        "col_widths": [95, 85, 85, 75, 62, 75, 55, 80, 70, 70],  # 752 pt
         "extractor": lambda f: [
             f.resource_name,
             f.evidence.get("vm_name") or "Primary VM",
             f.subscription_name,
             f.resource_group or "--",
-            f.evidence.get("environment") or "Test",
-            f.evidence.get("disk_tier") or f.evidence.get("tier") or "Premium SSD P10",
-            f"{f.evidence.get('disk_size_gb', 128)} GiB",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 19.71), f.currency),
+            f.evidence.get("environment") or "Production",
+            f.evidence.get("disk_tier") or f.evidence.get("tier") or "--",
+            f"{f.evidence.get('disk_size_gb')} GiB" if f.evidence.get('disk_size_gb') is not None else "--",
+            f.measured_value or f.evidence.get("iops_utilization") or "0.00%",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
@@ -188,10 +195,30 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.subscription_name,
             f.resource_group or "--",
             f.evidence.get("environment") or "Production",
-            _fmt_currency(f.evidence.get("previous_period_cost", f.evidence.get("prev_cost", 0.0)), f.currency),
-            _fmt_currency(f.evidence.get("current_period_cost", f.current_monthly_cost or 0.0), f.currency),
-            f"{'+' if float(f.evidence.get('cost_difference', (f.current_monthly_cost or 0.0) - float(f.evidence.get('previous_period_cost', 0.0)))) >= 0 else ''}{_fmt_currency(f.evidence.get('cost_difference', (f.current_monthly_cost or 0.0) - float(f.evidence.get('previous_period_cost', 0.0))), f.currency)}",
-            f"{'+' if (float(f.evidence.get('cost_change_pct', 0.0)) if isinstance(f.evidence.get('cost_change_pct'), (int, float)) else 0.0) >= 0 else ''}{f.evidence.get('cost_change_pct', 0.0):.1f}%" if isinstance(f.evidence.get("cost_change_pct"), (int, float)) else str(f.evidence.get("cost_change_pct", "0.0%")),
+            _fmt_currency(float(f.evidence.get("previous_period_cost", f.evidence.get("prev_cost", 0.0))), f.currency) if float(f.evidence.get("previous_period_cost", f.evidence.get("prev_cost", 0.0)) or 0.0) > 0.001 else "--",
+            _fmt_currency(float(f.evidence.get("current_period_cost", f.current_monthly_cost or 0.0)), f.currency) if float(f.evidence.get("current_period_cost", f.current_monthly_cost or 0.0) or 0.0) > 0.001 else "--",
+            (
+                f"+{_fmt_currency(float(f.evidence.get('cost_difference', 0.0)), f.currency)}"
+                if float(f.evidence.get("cost_difference", 0.0) or 0.0) > 0.001
+                else (
+                    f"-{_fmt_currency(abs(float(f.evidence.get('cost_difference', 0.0))), f.currency)}"
+                    if float(f.evidence.get("cost_difference", 0.0) or 0.0) < -0.001
+                    else "--"
+                )
+            ),
+            (
+                f"+{float(f.evidence.get('cost_change_pct', 0.0)):.1f}%"
+                if isinstance(f.evidence.get("cost_change_pct"), (int, float)) and float(f.evidence.get("cost_change_pct")) > 0.001
+                else (
+                    f"{float(f.evidence.get('cost_change_pct', 0.0)):.1f}%"
+                    if isinstance(f.evidence.get("cost_change_pct"), (int, float)) and float(f.evidence.get("cost_change_pct")) < -0.001
+                    else (
+                        str(f.evidence.get("cost_change_pct"))
+                        if f.evidence.get("cost_change_pct") and not isinstance(f.evidence.get("cost_change_pct"), (int, float))
+                        else "--"
+                    )
+                )
+            ),
         ]
     },
 
@@ -206,7 +233,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Resource Group",
             "Environment",
             "Current Configuration",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [115, 110, 95, 80, 67, 130, 75, 80],  # 752 pt
@@ -214,10 +241,18 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.resource_name,
             f.evidence.get("assessment_type") or f.evidence.get("opportunity_source") or "Compute Optimization",
             f.subscription_name,
-            f.resource_group or "--",
+            (
+                f.resource_group
+                if f.resource_group and f.resource_group not in ("Unknown", "--")
+                else (
+                    parse_azure_resource_id(f.resource_id).get("resource_group")
+                    if f.resource_id and parse_azure_resource_id(f.resource_id).get("resource_group") not in ("Unknown", None)
+                    else (f.resource_group or "--")
+                )
+            ),
             f.evidence.get("environment") or "Production",
             f.current_configuration or f.evidence.get("configuration") or "--",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost), f.currency),
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
@@ -233,7 +268,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Environment",
             "VM Size",
             "License Status",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [120, 100, 90, 75, 87, 120, 80, 80],  # 752 pt
@@ -262,7 +297,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Deallocated Status",
             "Auto Shutdown Enabled",
             "Scheduled Shutdown Time",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [95, 85, 75, 62, 75, 75, 65, 80, 70, 70],  # 752 pt
@@ -294,20 +329,20 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Used Space",
             "Free Space",
             "Utilization (%)",
-            "Cost",
+            COST_HEADER,
         ],
         "col_widths": [92, 90, 85, 75, 60, 70, 70, 70, 70, 70],  # 752 pt
         "extractor": lambda f: [
-            f.evidence.get("vm_name") or "Host VM",
+            f.evidence.get("vm_name") or f.evidence.get("attached_vm") or "Unattached",
             f.resource_name,
             f.subscription_name,
             f.resource_group or "--",
             f.evidence.get("environment") or "Production",
-            f"{f.evidence.get('total_capacity_gb', 512)} GB",
-            f"{f.evidence.get('used_space_gb', 476)} GB",
-            f"{f.evidence.get('free_space_gb', 36)} GB",
-            f"{f.evidence.get('utilization_pct', 93.0):.1f}%" if isinstance(f.evidence.get("utilization_pct"), (int, float)) else str(f.evidence.get("utilization_pct", "93.0%")),
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 73.22), f.currency),
+            f"{f.evidence.get('total_capacity_gb')} GB" if f.evidence.get("total_capacity_gb") is not None else "--",
+            f"{f.evidence.get('used_space_gb')} GB" if f.evidence.get("used_space_gb") is not None else "--",
+            f"{f.evidence.get('free_space_gb')} GB" if f.evidence.get("free_space_gb") is not None else "--",
+            f"{float(f.evidence.get('utilization_pct', 0.0)):.1f}%" if f.evidence.get("utilization_pct") is not None else "0.0%",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
         ]
     },
 
@@ -323,7 +358,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Database Tier",
             "CPU / DTU Utilization",
             "Storage Utilization",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [110, 95, 85, 67, 85, 85, 75, 75, 75],  # 752 pt
@@ -332,10 +367,10 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.subscription_name,
             f.resource_group or "--",
             f.evidence.get("environment") or "Production",
-            f.evidence.get("database_tier") or f.evidence.get("sku") or "General Purpose Gen5 4 vCores",
-            f.measured_value or f"Avg {f.evidence.get('avg_dtu_cpu_pct', 1.8):.1f}%",
-            f"{f.evidence.get('storage_used_gb', 14.2)} / {f.evidence.get('storage_allocated_gb', 250)} GB",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 185.00), f.currency),
+            f.evidence.get("database_tier") or f.evidence.get("sku") or "--",
+            f.measured_value or (f"Avg {float(f.evidence.get('avg_dtu_cpu_pct', 0.0)):.1f}%" if f.evidence.get("avg_dtu_cpu_pct") is not None else "0.0%"),
+            f"{f.evidence.get('storage_used_gb', 0)} / {f.evidence.get('storage_allocated_gb', 0)} GB",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
@@ -354,7 +389,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Last Activity",
             "Days Inactive",
             "Unwanted Asset Status",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [90, 85, 80, 75, 55, 65, 65, 55, 82, 50, 50],  # 752 pt
@@ -363,12 +398,12 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             _clean_resource_type(f.resource_type),
             f.subscription_name,
             f.resource_group or "--",
-            f.evidence.get("environment") or "Test",
-            f.evidence.get("creation_date") or (f.collected_at[:10] if f.collected_at else "--"),
-            f.evidence.get("last_activity") or f.evidence.get("creation_date") or "--",
-            f"{f.evidence.get('days_inactive', 0)} Days",
-            f.evidence.get("unwanted_status") or ("Unwanted (Cost Savable)" if f.evidence.get("days_inactive", 0) >= 30 else "Active"),
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 45.00), f.currency),
+            f.evidence.get("environment") or "Production",
+            f.evidence.get("creation_date") or "--",
+            f.evidence.get("last_activity") or "--",
+            f"{f.evidence.get('days_inactive')} Days" if isinstance(f.evidence.get('days_inactive'), int) else str(f.evidence.get('days_inactive') or "--"),
+            f.evidence.get("unwanted_status") or "Unwanted (Cost Savable)",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
@@ -376,28 +411,30 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
     # 12. Storage Account Lifecycle Management (COST-12)
     "storage_lifecycle": {
         "code": "COST-12",
-        "report_title": "Storage Account Lifecycle Policy Disabled Rules",
+        "report_title": "Storage Account Lifecycle Management (LCM) Status",
         "columns": [
             "Storage Account",
+            "Resource Type",
             "Subscription",
             "Resource Group",
             "Environment",
-            "Storage Tier",
-            "Access Tier",
-            "Redundancy",
-            "Cost",
+            "LCM Status",
+            "Total Rules",
+            "Active Rules",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
-        "col_widths": [110, 95, 85, 67, 80, 75, 80, 80, 80],  # 752 pt
+        "col_widths": [105, 75, 85, 80, 57, 100, 50, 50, 75, 75],  # 752 pt
         "extractor": lambda f: [
             f.resource_name,
+            f.evidence.get("resource_type") or "Storage Account",
             f.subscription_name,
             f.resource_group or "--",
             f.evidence.get("environment") or "Production",
-            f.evidence.get("storage_tier") or "Standard",
-            f.evidence.get("access_tier") or "Hot",
-            f.evidence.get("redundancy") or "GRS",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 240.00), f.currency),
+            f.evidence.get("lcm_status") or f.status or "Not Configured",
+            str(f.evidence.get("total_rules", 0)),
+            str(f.evidence.get("active_rules", f.evidence.get("enabled_rules", 0))),
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
@@ -414,7 +451,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Allocated Storage",
             "Used Storage",
             "Storage Utilization (%)",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [110, 95, 85, 67, 85, 80, 80, 75, 75],  # 752 pt
@@ -423,46 +460,17 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.subscription_name,
             f.resource_group or "--",
             f.evidence.get("environment") or "Production",
-            f"{f.evidence.get('allocated_storage_gb', 500)} GB",
-            f"{f.evidence.get('used_storage_gb', 18.5)} GB",
-            f"{f.evidence.get('utilization_pct', 3.7):.1f}%" if isinstance(f.evidence.get("utilization_pct"), (int, float)) else str(f.evidence.get("utilization_pct", "3.7%")),
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 115.00), f.currency),
+            f"{float(f.evidence.get('allocated_storage_gb', 0.0)):.1f} GB",
+            f"{float(f.evidence.get('used_storage_gb', 0.0)):.2f} GB",
+            f"{float(f.evidence.get('utilization_pct', 0.0)):.1f}%",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
 
-    # 14. Database SKU Under / Over-utilized (COST-14)
-    "database_sku": {
-        "code": "COST-14",
-        "report_title": "Database Compute & SKU Optimization",
-        "columns": [
-            "Database Name",
-            "Subscription",
-            "Resource Group",
-            "Environment",
-            "Current SKU",
-            "CPU Utilization",
-            "Storage Utilization",
-            "Cost",
-            "Est. Annual Savings",
-        ],
-        "col_widths": [110, 95, 85, 67, 85, 80, 80, 75, 75],  # 752 pt
-        "extractor": lambda f: [
-            f.resource_name,
-            f.subscription_name,
-            f.resource_group or "--",
-            f.evidence.get("environment") or "Production",
-            f.evidence.get("current_sku") or "GP_Gen5_8",
-            f"Avg {f.evidence.get('avg_cpu_pct', 2.4):.1f}%" if isinstance(f.evidence.get("avg_cpu_pct"), (int, float)) else str(f.evidence.get("avg_cpu_pct", "2.4%")),
-            f"{f.evidence.get('storage_utilization_pct', 8.5):.1f}%" if isinstance(f.evidence.get("storage_utilization_pct"), (int, float)) else str(f.evidence.get("storage_utilization_pct", "8.5%")),
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 360.00), f.currency),
-            _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
-        ]
-    },
-
-    # 15. Backup Status / Policy / Retention (COST-15)
+    # 14. Backup Status / Policy / Retention (COST-14)
     "backup_status": {
-        "code": "COST-15",
+        "code": "COST-14",
         "report_title": "Azure Backup Policy & Retention Cost Alignment",
         "columns": [
             "Resource Name",
@@ -473,7 +481,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Backup Policy",
             "Retention Period",
             "Backup Storage Used",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [92, 85, 75, 60, 75, 85, 70, 70, 70, 70],  # 752 pt
@@ -481,48 +489,48 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.resource_name,
             f.subscription_name,
             f.resource_group or "--",
-            f.evidence.get("environment") or "NonProd",
+            f.evidence.get("environment") or "Production",
             f.evidence.get("backup_status") or f.status or "Protected - Excessive Retention",
-            f.evidence.get("backup_policy") or "Daily-365Day-Retention",
-            f"{f.evidence.get('retention_days', 365)} days",
-            f"{f.evidence.get('backup_storage_tb', 4.2)} TB",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 95.00), f.currency),
+            f.evidence.get("backup_policy") or f.evidence.get("policy_name") or "--",
+            f.evidence.get("retention_display") or (f"{f.evidence.get('retention_days')} days" if f.evidence.get("retention_days") is not None else "--"),
+            f.evidence.get("backup_storage_display") or (f"{f.evidence.get('backup_storage_tb')} TB" if f.evidence.get("backup_storage_tb") is not None else (f"{f.evidence.get('backup_storage_gb')} GB" if f.evidence.get("backup_storage_gb") is not None else "--")),
+            _fmt_currency(f.evidence.get("actual_cost_mtd") if f.evidence.get("actual_cost_mtd") is not None else f.current_monthly_cost, f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
 
-    # 16. Old Snapshot / Expired Snapshot (COST-16)
+    # 15. Old Snapshot / Expired Snapshot (COST-15)
     "old_snapshots": {
-        "code": "COST-16",
+        "code": "COST-15",
         "report_title": "Aged & Stale Managed Disk Snapshots",
         "columns": [
             "Snapshot Name",
             "Source Disk",
             "Subscription",
             "Resource Group",
-            "Environment",
-            "Snapshot Age",
+            "Created Date",
+            "Snapshot Age (> 365 Days)",
             "Snapshot Size",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
-        "col_widths": [110, 95, 85, 67, 80, 80, 80, 75, 80],  # 752 pt
+        "col_widths": [110, 105, 95, 87, 75, 85, 65, 65, 65],  # 752 pt
         "extractor": lambda f: [
             f.resource_name,
-            f.evidence.get("source_disk") or f.evidence.get("source_resource") or "Unlinked Disk",
+            f.evidence.get("source_disk") or "Standalone Disk",
             f.subscription_name,
             f.resource_group or "--",
-            f.evidence.get("environment") or "Production",
-            f"{f.evidence.get('age_days', 184)} days",
-            f"{f.evidence.get('disk_size_gb', 128)} GiB",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 6.40), f.currency),
+            f.evidence.get("created_date") or "--",
+            f"{f.evidence.get('age_days', 366)} days",
+            f"{f.evidence.get('disk_size_gb') or f.evidence.get('size_gb') or 128} GiB",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
 
-    # 17. Function App Execution Time / Frequency (COST-17)
+    # 16. Function App Execution Time / Frequency (COST-16)
     "function_apps": {
-        "code": "COST-17",
+        "code": "COST-16",
         "report_title": "Function App Execution Frequency & Hosting Plan",
         "columns": [
             "Function App Name",
@@ -532,7 +540,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Hosting Plan",
             "Execution Count",
             "Average Execution Duration",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [110, 95, 85, 67, 95, 75, 75, 75, 75],  # 752 pt
@@ -549,42 +557,42 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
         ]
     },
 
-    # 18. Auto Start VM (COST-18)
+    # 17. Auto Start VM (COST-17)
     "auto_start_vm": {
-        "code": "COST-18",
-        "report_title": "VM Auto-Start Schedule & Off-Hours Impact",
+        "code": "COST-17",
+        "report_title": "VM Auto-Shutdown Off-Hours Execution",
         "columns": [
             "VM Name",
             "Subscription",
             "Resource Group",
             "Environment",
             "VM Size",
-            "Auto Start Status",
-            "Configured Start Time",
-            "Cost",
+            "Shutdown Schedule",
+            "Off-Hours Activity / Status",
+            COST_HEADER,
             "Est. Annual Cost Impact",
         ],
-        "col_widths": [105, 95, 85, 67, 80, 85, 85, 75, 75],  # 752 pt
+        "col_widths": [105, 85, 80, 60, 77, 85, 105, 75, 80],  # 752 pt
         "extractor": lambda f: [
             f.resource_name,
             f.subscription_name,
             f.resource_group or "--",
-            f.evidence.get("environment") or "NonProd",
-            f.evidence.get("vm_size") or "Standard_D2s_v5",
-            f.evidence.get("auto_start_status") or f.status or "Configured (Weekend Active)",
-            f.evidence.get("configured_start_time") or "06:00 UTC (Mon-Sun)",
-            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 70.08), f.currency),
+            f.evidence.get("environment") or "Production",
+            f.evidence.get("vm_size") or "--",
+            f.evidence.get("scheduled_shutdown_time") or "--",
+            f.evidence.get("off_hours_status") or f.status or "Running in Shutdown Window",
+            _fmt_currency(f.evidence.get("actual_cost_mtd", f.current_monthly_cost or 0.0), f.currency),
             _fmt_savings(
-                f.evidence.get("annual_cost_impact", f.estimated_annual_savings or 480.00),
+                f.evidence.get("annual_cost_impact", f.estimated_annual_savings or 0.0),
                 f.currency,
-                (f.evidence.get("annual_cost_impact", f.estimated_annual_savings or 480.00)) / 12.0
+                (f.evidence.get("annual_cost_impact", f.estimated_annual_savings or 0.0)) / 12.0
             ),
         ]
     },
 
-    # 19. Non-LRS Storage Redundancy Optimization (COST-19)
+    # 18. Non-LRS Storage Redundancy Optimization (COST-18)
     "non_lrs_storage_redundancy": {
-        "code": "COST-19",
+        "code": "COST-18",
         "report_title": "Non-LRS Storage Redundancy Optimization",
         "columns": [
             "Storage Account",
@@ -593,7 +601,7 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Environment",
             "Current Redundancy",
             "Required Redundancy",
-            "Cost",
+            COST_HEADER,
             "Est. Annual Savings",
         ],
         "col_widths": [120, 105, 95, 75, 82, 85, 95, 95],  # 752 pt
@@ -608,6 +616,10 @@ COST_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             _fmt_savings(f.estimated_annual_savings, f.currency, f.estimated_monthly_savings),
         ]
     },
+}
+
+COST_SPEC_ALIASES: Dict[str, str] = {
+    "top_opportunities": "top_20_opportunities",
 }
 
 class FindingObjectWrapper:
@@ -639,7 +651,15 @@ class FindingObjectWrapper:
 
 def get_cost_spec(assessment_id: str) -> Optional[Dict[str, Any]]:
     """Returns the report specification for a cost assessment."""
-    return COST_REPORT_SPECS.get(assessment_id)
+    if assessment_id in COST_REPORT_SPECS:
+        return COST_REPORT_SPECS[assessment_id]
+    aliased = COST_SPEC_ALIASES.get(assessment_id)
+    if aliased and aliased in COST_REPORT_SPECS:
+        return COST_REPORT_SPECS[aliased]
+    for k, v in COST_REPORT_SPECS.items():
+        if v.get("code", "").lower() == assessment_id.lower():
+            return v
+    return None
 
 def extract_cost_finding_row(assessment_id: str, finding: Any) -> List[str]:
     """
@@ -649,20 +669,29 @@ def extract_cost_finding_row(assessment_id: str, finding: Any) -> List[str]:
     if isinstance(finding, dict):
         finding = FindingObjectWrapper(finding)
 
-    spec = COST_REPORT_SPECS.get(assessment_id)
+    spec = get_cost_spec(assessment_id)
     if not spec:
-        m_cost = getattr(finding, "current_monthly_cost", None) or finding.get("current_monthly_cost") or 0.0
-        m_sav = getattr(finding, "estimated_monthly_savings", None) or finding.get("estimated_monthly_savings") or 0.0
-        a_sav = getattr(finding, "estimated_annual_savings", None) or finding.get("estimated_annual_savings") or (m_sav * 12)
-        r_type = getattr(finding, "resource_type", "") or finding.get("resource_type", "")
+        def _get_val(k: str, default: Any = None) -> Any:
+            v = getattr(finding, k, None)
+            if v is not None:
+                return v
+            if hasattr(finding, "get"):
+                return finding.get(k, default)
+            return default
+
+        m_cost = _get_val("current_monthly_cost") or 0.0
+        m_sav = _get_val("estimated_monthly_savings") or 0.0
+        a_sav = _get_val("estimated_annual_savings") or (m_sav * 12)
+        r_type = _get_val("resource_type") or ""
+        curr = _get_val("currency") or "USD"
         return [
-            getattr(finding, "subscription_name", None) or finding.get("subscription_name", "--"),
-            getattr(finding, "resource_name", None) or finding.get("resource_name", "--"),
-            r_type.split("/")[-1] if "/" in r_type else r_type,
-            getattr(finding, "resource_group", None) or finding.get("resource_group", "--"),
-            f"${m_cost:,.2f}",
-            f"${m_sav:,.2f}",
-            f"${a_sav:,.2f} (${m_sav:,.2f}/month)",
-            getattr(finding, "recommendation", None) or finding.get("recommendation", "--")
+            _get_val("subscription_name") or "--",
+            _get_val("resource_name") or "--",
+            r_type.split("/")[-1] if "/" in str(r_type) else str(r_type),
+            _get_val("resource_group") or "--",
+            _fmt_currency(m_cost, curr),
+            _fmt_currency(m_sav, curr),
+            f"{_fmt_currency(a_sav, curr)} ({_fmt_currency(m_sav, curr)}/month)",
+            _get_val("recommendation") or "--"
         ]
     return spec["extractor"](finding)

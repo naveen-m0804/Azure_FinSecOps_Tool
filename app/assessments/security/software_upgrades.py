@@ -1,5 +1,6 @@
 import datetime
 import time
+import logging
 from typing import List, Dict, Any
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
@@ -7,11 +8,14 @@ from app.schemas.finding import FindingModel
 from app.azure.defender import DefenderAdapter
 from app.utils.resource_ids import parse_azure_resource_id
 
+logger = logging.getLogger("azure_finsecops.assessments.software_upgrades")
+
 # Known Defender Vulnerability Assessment Definition GUIDs for Virtual Machines
 VULNERABILITY_ASSESSMENT_IDS = [
-    "11982ea1-e508-49fb-b03a-3ee0a8276f57", # Machines should have vulnerability findings resolved
-    "c609cf0f-714f-40e9-a099-80944d373564", # Vulnerabilities on virtual machines should be remediated
-    "477461f4-e123-4a4b-a6fb-2d350f452e87"  # Container and machine software vulnerability scan
+    "11982ea1-e508-49fb-b03a-3ee0a8276f57", # Machines should have vulnerability findings resolved (Defender Vulnerability Management)
+    "c609cf0f-714f-40e9-a099-80944d373564", # Vulnerabilities on virtual machines should be remediated (Integrated Qualys / TVM)
+    "477461f4-e123-4a4b-a6fb-2d350f452e87", # Container and machine software vulnerability scan
+    "4ab6e338-7657-4185-920f-0d927a7c64cf", # System updates should be installed on your machines
 ]
 
 class SoftwareUpgradesAssessment(BaseAssessment):
@@ -19,73 +23,89 @@ class SoftwareUpgradesAssessment(BaseAssessment):
     code = "SEC-10"
     category = "security"
     name = "Software Version Upgrades"
-    description = "Identify outdated installed software, libraries, and applications on virtual machines via software inventory."
-    purpose = "Mitigate known CVEs and exploitable vulnerabilities in installed third-party software packages."
-    required_permissions = ["Microsoft.Security/assessments/subAssessments/read", "Security Reader"]
-    required_data_sources = ["Defender Vulnerability Management SubAssessments API (2019-01-01-preview)"]
+    description = "Identify outdated installed software, libraries, and applications on virtual machines via Microsoft Defender Vulnerability Management."
+    purpose = "Mitigate known CVEs and exploitable vulnerabilities in installed third-party software packages and system libraries."
+    required_permissions = [
+        "Microsoft.Security/assessments/subAssessments/read",
+        "Microsoft.Security/assessments/read",
+        "Security Reader"
+    ]
+    required_data_sources = ["Defender Vulnerability Management SubAssessments & Azure Resource Graph"]
 
     async def run(self, context: AssessmentContext) -> AssessmentResult:
         start_t = time.time()
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-        
         findings: List[FindingModel] = []
         errors: List[str] = []
         resources_evaluated = 0
-        telemetry_missing = False
 
         for sub in context.subscriptions:
             all_sub_items: List[Dict[str, Any]] = []
 
-            # 1. Query subscription-level sub-assessments
-            top_sub = await DefenderAdapter.get_all_sub_assessments(context.client, sub.subscription_id)
-            if top_sub.get("success") and top_sub.get("value"):
-                all_sub_items.extend(top_sub.get("value", []))
+            # 1. Primary: Direct query via Azure Resource Graph (how Azure Portal renders software vulnerabilities)
+            try:
+                arg_sub_items = await DefenderAdapter.get_sub_assessments_via_arg(context.client, sub.subscription_id)
+                if arg_sub_items:
+                    all_sub_items.extend(arg_sub_items)
+            except Exception as ex:
+                logger.debug("ARG sub-assessments query in sub %s: %s", sub.subscription_id, ex)
 
-            # 2. Query known Defender Vulnerability Assessment definitions
+            # 2. Secondary: Query known Defender Vulnerability Assessment definitions
             for ass_guid in VULNERABILITY_ASSESSMENT_IDS:
-                resp = await DefenderAdapter.get_sub_assessments(context.client, sub.subscription_id, ass_guid)
-                if resp.get("success") and resp.get("value"):
-                    all_sub_items.extend(resp.get("value", []))
+                try:
+                    resp = await DefenderAdapter.get_sub_assessments(context.client, sub.subscription_id, ass_guid)
+                    if resp.get("success") and resp.get("value"):
+                        all_sub_items.extend(resp.get("value", []))
+                except Exception as ex:
+                    logger.debug("Defender sub-assessments query for %s: %s", ass_guid, ex)
 
-            # 3. Discover dynamic vulnerability assessments from Defender recommendations
-            if not all_sub_items:
-                ass_list_resp = await DefenderAdapter.get_security_assessments(context.client, sub.subscription_id)
+            # 3. Tertiary: Discover dynamic vulnerability assessments from Defender recommendations
+            try:
+                ass_list_resp = await DefenderAdapter.get_security_assessments(context.client, sub.subscription_id, max_items=300)
                 if ass_list_resp.get("success"):
                     for a_item in ass_list_resp.get("value", []):
                         a_name = a_item.get("name", "")
-                        props = a_item.get("properties", {})
-                        meta = props.get("metadata", {})
+                        props = a_item.get("properties", {}) or {}
+                        meta = props.get("metadata", {}) or {}
                         disp = (meta.get("displayName") or props.get("displayName") or "").lower()
-                        if any(w in disp for w in ["update", "upgrade", "vulnerabilit", "cve", "qualys", "tvm", "software"]):
+
+                        if any(w in disp for w in ["vulnerabilit", "cve", "qualys", "tvm", "software", "update", "upgrade"]):
                             sub_resp = await DefenderAdapter.get_sub_assessments(context.client, sub.subscription_id, a_name)
                             if sub_resp.get("success") and sub_resp.get("value"):
                                 all_sub_items.extend(sub_resp.get("value", []))
+            except Exception as ex:
+                logger.debug("Defender recommendations query in sub %s: %s", sub.subscription_id, ex)
 
+            # Deduplicate and evaluate discovered vulnerable software items
             seen_item_ids = set()
             for item in all_sub_items:
                 item_id = item.get("id") or item.get("name")
-                if item_id in seen_item_ids:
+                if not item_id or item_id in seen_item_ids:
                     continue
                 seen_item_ids.add(item_id)
                 resources_evaluated += 1
 
-                props = item.get("properties", {})
-                status_obj = props.get("status", {})
-                code = status_obj.get("code", "")
+                props = item.get("properties", {}) or {}
+                status_obj = props.get("status", {}) or {}
+                code = str(status_obj.get("code") or props.get("status", {}).get("code") or "").lower()
 
-                # Only report security gaps: Unhealthy software vulnerabilities
-                if code.lower() in ("unhealthy", "open", "active"):
-                    display_name = props.get("displayName") or item.get("name", "Vulnerable Software")
-                    severity = status_obj.get("severity") or props.get("severity", "Medium")
-                    res_details = props.get("resourceDetails", {})
+                # Report active security vulnerabilities (Unhealthy / Open)
+                if code in ("unhealthy", "open", "active") or not code:
+                    display_name = props.get("displayName") or item.get("name", "Update Vulnerable Software Package")
+                    # Filter: fetch only items where recommendation/title starts with 'update'
+                    if not display_name.strip().lower().startswith("update"):
+                        continue
+
+                    severity = str(status_obj.get("severity") or props.get("severity") or "Medium").capitalize()
+                    res_details = props.get("resourceDetails", {}) or {}
                     vm_id = res_details.get("id") or res_details.get("Id") or ""
                     parsed = parse_azure_resource_id(vm_id)
                     rg_name = parsed.get("resource_group") or "Unknown"
                     vm_name = parsed.get("resource_name") or "Virtual Machine"
 
                     # Extract software details and check for update keyword
-                    add_data = props.get("additionalData", {})
+                    add_data = props.get("additionalData", {}) or {}
                     software_name = add_data.get("softwareName") or display_name.split(" ")[0]
                     publisher = add_data.get("vendor") or "--"
                     installed_ver = add_data.get("version") or "--"
@@ -105,16 +125,16 @@ class SoftwareUpgradesAssessment(BaseAssessment):
                             resource_group=rg_name,
                             resource_name=vm_name,
                             resource_type="Microsoft.Compute/virtualMachines",
-                            resource_id=vm_id,
+                            resource_id=vm_id or item_id,
                             region="global",
-                            severity=severity.capitalize(),
+                            severity=severity,
                             status="Update Required" if is_update else "Outdated",
                             current_configuration=f"{software_name} {installed_ver} (CVE: {cve_str})",
                             measured_value=f"Installed: {installed_ver} | Update: {fixed_ver}",
                             recommended_configuration=f"Apply vendor security update to version {fixed_ver}" if fixed_ver != "--" else "Apply latest vendor security update",
                             recommendation=remediation,
                             metric_period="Defender Vulnerability Assessment",
-                            data_source="Defender for Cloud SubAssessments API (2019-01-01-preview)",
+                            data_source="Defender Vulnerability Management SubAssessments API",
                             evidence={
                                 "software": software_name,
                                 "software_name": software_name,

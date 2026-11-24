@@ -116,6 +116,14 @@ class FinSecOpsGuardrails:
                     f"and cannot modify or delete Azure resources. Manual remediation instructions are provided instead."
                 )
 
+        # If generic ARM query, strictly ensure read-only GET requests
+        if "generic_arm" in t_name or "arm_query" in t_name:
+            method = str(tool_args.get("method") or "GET").upper().strip()
+            if method != "GET":
+                raise SecurityPolicyViolationError(
+                    f"Forbidden HTTP method '{method}' for ARM query. FinSecOps AI strictly allows read-only GET operations."
+                )
+
         # If Azure Resource Graph query, inspect KQL for destructive statements
         if "resource_graph" in t_name or "kql" in t_name:
             query = tool_args.get("query", "")
@@ -180,6 +188,7 @@ class FinSecOpsGuardrails:
             text
         )
         text = re.sub(r'gsk_[a-zA-Z0-9]{30,}', '[REDACTED_GROQ_KEY]', text)
+        text = re.sub(r'nvapi-[a-zA-Z0-9_\-]{30,}', '[REDACTED_NVIDIA_KEY]', text)
         text = re.sub(r'hf_[a-zA-Z0-9]{30,}', '[REDACTED_HF_KEY]', text)
         text = re.sub(r'ey[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}', '[REDACTED_JWT_TOKEN]', text)
         return text

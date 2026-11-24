@@ -1,6 +1,6 @@
 # Azure FinSecOps Platform - Enterprise Technology Stack & Architecture Specification
 
-> **Document Version:** 2.0.0  
+> **Document Version:** 3.0.0  
 > **Target Audience:** Client Technical Leadership, Enterprise Architects, Security & FinOps Steering Committees  
 > **Author:** Senior Project Delivery Manager & Principal Solution Architect  
 > **Environment:** Hybrid Cloud / Microsoft Azure Enterprise Infrastructure  
@@ -11,7 +11,7 @@
 
 The **Azure FinSecOps Platform** is an enterprise-grade cloud governance and financial optimization system engineered to deliver deep visibility, automated assessment, and verifiable savings across multi-tenant Microsoft Azure estates. 
 
-Built with an **asynchronous-first architecture**, the platform connects directly to Azure native management backbones-including Azure Resource Graph (ARG), Azure Resource Manager (ARM), Microsoft Defender for Cloud, Azure Monitor, and Azure Cost Management-to evaluate infrastructure against 33 proprietary evaluation modules (14 Security Posture modules and 19 Financial Optimization modules).
+Built with an **asynchronous-first architecture**, the platform connects directly to Azure native management backbones-including Azure Resource Graph (ARG), Azure Resource Manager (ARM), Microsoft Defender for Cloud, Azure Monitor, and Azure Cost Management-to evaluate infrastructure against 32 proprietary evaluation modules (14 Security Posture modules and 18 Financial Optimization modules).
 
 ```mermaid
 flowchart TD
@@ -28,7 +28,7 @@ flowchart TD
 
     subgraph EngineLayer["Core Evaluation & Intelligence Engine"]
         SecRegistry["14 Security Assessment Engines\n(Defender for Cloud, RBAC, Governance)"]
-        CostRegistry["19 Cost Optimization Engines\n(Metrics Telemetry, Cost Query, Sizing)"]
+        CostRegistry["18 Cost Optimization Engines\n(Metrics Telemetry, Cost Query, Sizing)"]
         Aggregator["Cross-Tenant Aggregation & Deduplication\n(KPI Synthesis & Currency Formatting)"]
     end
 
@@ -61,6 +61,16 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Runtime & Language** | Python | 3.11+ | High-concurrency async coroutines, strict typing, and cross-platform reliability. |
 | **Web & REST Framework** | FastAPI / Starlette / Flask | 0.110+ | Ultra-low latency asynchronous API endpoints, dependency injection, OpenAPI documentation. |
+| **Autonomous AI Gateway** | Multi-Provider Agentic AI | 3.0+ | NVIDIA Nemotron (`nvidia/nemotron-3.5-super-vl-120b-a12b`), Groq Cloud (`openai/gpt-oss-120b`), OpenAI, Gemini, Claude. |
+| **Agent Tool Execution** | Dynamic Tool Calling Engine | 15 Tools | 12 domain-specific tools + 3 dynamic runtime tools (`dynamic_code_interpreter`, `azure_generic_resource_query`, `azure_rest_call`). |
+| **Authentication & IAM** | MSAL Python (`msal`) | 1.28+ | Microsoft identity platform OAuth2 Client Credentials flow; acquires ARM tokens without secret exposure. |
+| **HTTP Transport Engine** | HTTPX (`httpx`) | 0.27+ | Asynchronous HTTP client with connection pooling, retries, and timeout management for Azure endpoints. |
+| **Data Validation & Schemas** | Pydantic v2 & Pydantic-Settings | 2.6+ | Type-safe schema validation for cloud payloads, job state models, and environment settings. |
+| **PDF Reporting Engine** | ReportLab | 4.1+ | Generates vector-grade, landscape boardroom PDF deliverables with custom tables and typography. |
+| **Spreadsheet Engine** | OpenPyXL | 3.1+ | Generates formatted Excel deliverables with frozen headers, currency styling, and auto-sized columns. |
+| **Frontend Framework** | Pure Vanilla JavaScript (ES6+) | Modern | Zero-build single-page architecture eliminating node_modules vulnerabilities and bundle compilation overhead. |
+| **Styling & Design System** | Custom CSS3 + FontAwesome 6 | 6.5.1 | Custom design system with dark/light visual contrast, responsive grids, and font-based iconography. |
+| **Configuration Engine** | Python Dotenv (`python-dotenv`) | 1.0+ | Production configuration via `.env` files with runtime fallback defaults. |
 | **Authentication & IAM** | MSAL Python (`msal`) | 1.28+ | Microsoft identity platform OAuth2 Client Credentials flow; acquires ARM tokens without secret exposure. |
 | **HTTP Transport Engine** | HTTPX (`httpx`) | 0.27+ | Asynchronous HTTP client with connection pooling, retries, and timeout management for Azure endpoints. |
 | **Data Validation & Schemas** | Pydantic v2 & Pydantic-Settings | 2.6+ | Type-safe schema validation for cloud payloads, job state models, and environment settings. |
@@ -112,6 +122,17 @@ The platform exports governance deliverables in two formats:
 * **Zero-Build, Pure Standards Approach:** Native ES6+, HTML5, and CSS3 without npm/webpack build tools.
 * **Persistent Tab & State Session (`sessionStorage`):** Refreshing the browser or navigating between tabs preserves tenant connection state, running job IDs, findings, and active tab selection.
 * **Execution Safety Lockout:** During assessment execution, all execution triggers (`Run All`, `Run Security`, `Run Cost`, and card-level module buttons) are disabled via `.btn-disabled` (`pointer-events: none`).
+
+### 3.5 Enterprise Agentic AI Engine & Dynamic Tool Calling
+* **Universal Multi-Provider Gateway:** Pluggable AI inference architecture supporting NVIDIA Nemotron (`nvidia/nemotron-3.5-super-vl-120b-a12b` via NVIDIA NIM), Groq Cloud (`openai/gpt-oss-120b`), OpenAI, Anthropic Claude, Google Gemini, and Azure OpenAI.
+* **Autonomous Multi-Step Tool Calling Loop:** Agents autonomously inspect requests, select tools, analyze intermediate Azure responses, and iterate through up to 8 tool executions before producing executive answers.
+* **15 Enterprise Agent Tools:**
+  - **12 Domain-Specific Tools:** Specialized assessment evaluators for Secure Score, Defender alerts, VM rightsizing, orphaned disks, unattached public IPs, SQL database metrics, diagnostic logs, and cost spikes.
+  - **3 Dynamic Runtime Tools:**
+    1. `dynamic_code_interpreter`: Executes sandboxed Python code to calculate complex cost differentials, amortized statistics, and mathematical trends.
+    2. `azure_generic_resource_query`: Executes arbitrary KQL queries against Azure Resource Graph to investigate unforeseen or custom cloud configurations.
+    3. `azure_rest_call`: Queries any read-only Azure REST API endpoint dynamically with zero hardcoding.
+* **Strict Read-Only Guardrails:** Enforces GET-only methods, blocks destructive verbs (`DELETE`, `PATCH`, `PUT`), and redacts bearer tokens, client secrets, and passwords before AI prompt ingestion.
 
 ---
 

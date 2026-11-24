@@ -20,9 +20,14 @@ class Settings(BaseSettings):
     
     # --------------------------------------------------------------------------
     # Genuine Dynamic Agentic AI Engine (Universal Multi-Provider Support)
-    # Supported AI_PROVIDER values: groq | openai | gemini | claude | azure_openai
+    # Supported AI_PROVIDER values: groq | nemotron | openai | gemini | claude | azure_openai
     # --------------------------------------------------------------------------
     ai_provider: str = os.getenv("AI_PROVIDER", "groq")
+
+    # NVIDIA Nemotron Configuration
+    nemotron_api_key: str = os.getenv("NEMOTRON_API_KEY", os.getenv("NVIDIA_API_KEY", ""))
+    nemotron_model: str = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
+    nemotron_base_url: str = os.getenv("NEMOTRON_BASE_URL", os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"))
 
     # Groq Cloud Configuration
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")

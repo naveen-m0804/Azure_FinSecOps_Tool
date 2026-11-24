@@ -31,7 +31,6 @@ ASSESSMENT_PERMISSIONS_MATRIX: Dict[str, List[str]] = {
     "new_unused_resources": ["Microsoft.Resources/subscriptions/resources/read", "Microsoft.Insights/metrics/read", "Reader"],
     "storage_lifecycle": ["Microsoft.CostManagement/query/action", "Microsoft.Storage/storageAccounts/managementPolicies/read", "Cost Management Reader", "Reader"],
     "database_allocated_usage": ["Microsoft.Sql/servers/databases/read", "Microsoft.Insights/metrics/read", "Reader"],
-    "database_sku": ["Microsoft.Sql/servers/databases/read", "Microsoft.Insights/metrics/read", "Reader"],
     "backup_status": ["Microsoft.RecoveryServices/vaults/read", "Reader"],
     "old_snapshots": ["Microsoft.Compute/snapshots/read", "Microsoft.CostManagement/query/action", "Cost Management Reader", "Reader"],
     "function_apps": ["Microsoft.Web/sites/read", "Microsoft.Insights/metrics/read", "Reader"],

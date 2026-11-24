@@ -17,7 +17,7 @@
   --border-medium: #CBD5E1;
 
   /* Background Grid Pattern Lines Opacity: Adjust here (default 0.10 for soft, faint lines) */
-  --bg-grid-color: rgba(203, 213, 225, 0.45);
+  --bg-grid-color: rgba(203, 213, 225, 0.35);
 
   /* Status & Severity */
   --color-green: #10B981;
@@ -1802,7 +1802,7 @@ body::before {
 .cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 24px;
+  gap: 16px;
 }
 
 .ass-card {
@@ -1811,7 +1811,7 @@ body::before {
   background-color: #FFFFFF !important;
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
-  padding: 18px 16px;
+  padding: 16px 10px;
   box-shadow: var(--shadow-sm);
   display: flex;
   flex-direction: column;
@@ -1935,39 +1935,39 @@ body::before {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  flex-wrap: nowrap;
+  flex-wrap: nowrap !important;
   width: 100%;
 }
 
 .card-actions-left {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  flex-wrap: nowrap;
-  flex-shrink: 1;
+  gap: 4px;
+  flex-wrap: nowrap !important;
+  flex-shrink: 0;
   min-width: 0;
 }
 
 .card-actions-left .btn {
-  padding: 5px 8px;
-  font-size: 0.73rem;
+  padding: 4px 6px;
+  font-size: 0.70rem;
   white-space: nowrap;
 }
 
 .card-actions-left .btn i {
-  margin-right: 4px;
+  margin-right: 2px;
 }
 
 .card-report-btn-group {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   flex-shrink: 0;
 }
 
 .btn-card-dl {
-  padding: 4px 7px;
-  font-size: 0.72rem;
+  padding: 3px 5px;
+  font-size: 0.69rem;
   font-weight: 700;
   border-radius: var(--radius-sm);
   background: #ffffff;
@@ -1975,26 +1975,26 @@ body::before {
   color: var(--text-main);
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.18s ease;
 }
 
 .btn-card-dl i {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
 }
 
-.ass-actions > .btn {
-  padding: 5px 12px;
-  font-size: 0.75rem;
+.ass-actions>.btn {
+  padding: 4px 9px;
+  font-size: 0.72rem;
   font-weight: 700;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
-.ass-actions > .btn i {
-  margin-right: 4px;
+.ass-actions>.btn i {
+  margin-right: 2px;
 }
 
 /* Individual Module PDF Button when enabled */

@@ -55,6 +55,34 @@ class ComputeAdapter:
             return {"success": False, "status_code": 500, "error": str(ex)}
 
     @staticmethod
+    async def get_all_patch_assessments_via_arg(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves patch assessment summaries across all VMs in the subscription via Azure Resource Graph.
+        """
+        try:
+            arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+            arg_payload = {
+                "subscriptions": [subscription_id],
+                "query": (
+                    f"patchassessmentresources "
+                    f"| where subscriptionId =~ '{subscription_id}' "
+                    f"| where type =~ 'microsoft.compute/virtualmachines/patchassessmentresults' "
+                    f"| project id, name, type, properties"
+                ),
+                "options": {
+                    "resultFormat": "objectArray"
+                }
+            }
+            resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+        return []
+
+    @staticmethod
     async def get_vm_instance_view(client: AzureClientBase, resource_id: str) -> Dict[str, Any]:
         """
         Retrieves VM instance view to determine exact PowerState.

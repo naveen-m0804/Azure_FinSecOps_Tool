@@ -41,42 +41,71 @@ class StorageAdapter:
                 policy = props.get("policy", {})
                 rules = policy.get("rules", [])
                 total_rules = len(rules)
-                enabled_rules = [r for r in rules if r.get("enabled", True)]
+                enabled_rules = [r for r in rules if r.get("enabled", True) is True or str(r.get("enabled", "")).lower() == "true"]
+                disabled_rules = [r for r in rules if r.get("enabled") is False or str(r.get("enabled", "")).lower() in ("false", "disabled")]
                 
                 if total_rules == 0:
                     status = "Configured - No Rules"
-                elif len(enabled_rules) > 0:
-                    status = "Configured"
-                else:
+                elif len(enabled_rules) == 0:
                     status = "Configured - All Rules Disabled"
+                elif len(disabled_rules) > 0:
+                    status = f"Configured - {len(disabled_rules)} Rules Disabled"
+                else:
+                    status = "Configured"
 
                 rule_names = "; ".join([r.get("name", "Unnamed") for r in rules])
                 enabled_rule_names = "; ".join([r.get("name", "Unnamed") for r in enabled_rules])
+                disabled_rule_names = "; ".join([r.get("name", "Unnamed") for r in disabled_rules])
 
                 return {
                     "success": True,
                     "status": status,
                     "total_rules": total_rules,
                     "enabled_rules_count": len(enabled_rules),
+                    "disabled_rules_count": len(disabled_rules),
                     "rule_names": rule_names,
                     "enabled_rule_names": enabled_rule_names,
+                    "disabled_rule_names": disabled_rule_names,
                     "last_modified": props.get("lastModifiedTime"),
                     "raw": data
                 }
-            elif resp.status_code == 404:
+            elif resp.status_code in (404, 400) or "notfound" in resp.text.lower() or "does not exist" in resp.text.lower():
                 return {
                     "success": True,
                     "status": "Not Configured",
                     "total_rules": 0,
                     "enabled_rules_count": 0,
+                    "disabled_rules_count": 0,
                     "rule_names": "",
                     "enabled_rule_names": "",
+                    "disabled_rule_names": "",
                     "raw": None
                 }
-            return {
-                "success": False,
-                "error": f"HTTP {resp.status_code}: {resp.text}",
-                "status": "Error"
-            }
+            else:
+                # Mirror LCM_Status_Check_Top_Storageaccounts.txt: treat unknown/unconfigured policy as Not Configured
+                return {
+                    "success": True,
+                    "status": "Not Configured",
+                    "total_rules": 0,
+                    "enabled_rules_count": 0,
+                    "disabled_rules_count": 0,
+                    "rule_names": "",
+                    "enabled_rule_names": "",
+                    "disabled_rule_names": "",
+                    "error": f"HTTP {resp.status_code}: {resp.text}",
+                    "raw": None
+                }
         except Exception as ex:
-            return {"success": False, "error": str(ex), "status": "Error"}
+            # Mirror LCM_Status_Check_Top_Storageaccounts.txt: on error, default to Not Configured
+            return {
+                "success": True,
+                "status": "Not Configured",
+                "total_rules": 0,
+                "enabled_rules_count": 0,
+                "disabled_rules_count": 0,
+                "rule_names": "",
+                "enabled_rule_names": "",
+                "disabled_rule_names": "",
+                "error": str(ex),
+                "raw": None
+            }

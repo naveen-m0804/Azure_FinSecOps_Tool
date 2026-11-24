@@ -1,14 +1,29 @@
 import datetime
 import time
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
 from app.azure.cost_management import CostManagementAdapter
 from app.azure.resources import ResourcesAdapter
-from app.azure.pricing import PricingEngine
-from app.utils.dates import get_current_month_to_date
 from app.utils.resource_ids import parse_azure_resource_id
+
+
+def _extract_resource_group(resource_id: str, fallback: Optional[str] = None) -> str:
+    """Extracts valid resource group name from resource ID, avoiding 'Unknown'."""
+    if fallback and fallback not in ("Unknown", "--", "", "Subscription Scope"):
+        return fallback
+    if resource_id:
+        m = re.search(r"/resourceGroups/([^/]+)", resource_id, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        parsed = parse_azure_resource_id(resource_id)
+        rg = parsed.get("resource_group")
+        if rg and rg not in ("Unknown", "--", ""):
+            return rg
+    return fallback or "--"
+
 
 class Top20OpportunitiesAssessment(BaseAssessment):
     assessment_id = "top_20_opportunities"
@@ -30,40 +45,44 @@ class Top20OpportunitiesAssessment(BaseAssessment):
         start_t = time.time()
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-        
         findings: List[FindingModel] = []
         errors: List[str] = []
 
         seen_resource_ids = set()
         candidate_findings: List[FindingModel] = []
 
-        # If previous assessment results are stored on context or runner executes them:
+        # 1. If previous assessment results are stored on context, aggregate them
         if hasattr(context, "cached_cost_findings") and context.cached_cost_findings:
             for f in context.cached_cost_findings:
                 if f.resource_id not in seen_resource_ids and (f.estimated_annual_savings or 0.0) > 0:
                     seen_resource_ids.add(f.resource_id)
+                    # Ensure accurate resource group is populated on candidate findings
+                    f.resource_group = _extract_resource_group(f.resource_id, f.resource_group)
                     candidate_findings.append(f)
 
-        # If standalone execution without prior cached findings, query Cost Management for top spending resources
+        # 2. If standalone execution without prior cached findings, query Cost Management for top spending resources
         if not candidate_findings:
-            mtd_start, mtd_end = get_current_month_to_date()
+            cost_start, cost_end, cost_month = CostManagementAdapter.get_last_completed_month_date_range()
             for sub in context.subscriptions:
                 try:
                     sub_costs = await CostManagementAdapter.query_resource_costs(
                         context.client,
                         subscription_id=sub.subscription_id,
-                        start_date=mtd_start,
-                        end_date=mtd_end
+                        start_date=cost_start,
+                        end_date=cost_end
                     )
                     sorted_items = sorted(sub_costs.values(), key=lambda x: x.get("cost", 0.0), reverse=True)[:25]
                     for idx, item in enumerate(sorted_items, 1):
                         res_id = item.get("resource_id", "")
-                        cost_val = item.get("cost", 0.0)
+                        cost_val = float(item.get("cost", 0.0))
+                        if cost_val <= 0.001:
+                            continue
+
                         curr = item.get("currency", context.currency)
                         parsed = parse_azure_resource_id(res_id)
                         res_name = parsed.get("resource_name") or f"Resource-{idx}"
                         res_type = parsed.get("resource_type") or "Microsoft.Resources/resource"
-                        rg = parsed.get("resource_group") or "Unknown"
+                        rg = _extract_resource_group(res_id, parsed.get("resource_group"))
 
                         est_mo_saving = round(cost_val * 0.25, 2)
                         candidate_findings.append(
@@ -80,14 +99,15 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                                 region="global",
                                 severity="High" if cost_val > 500 else "Medium",
                                 status="Top Cost Consumer",
-                                current_configuration=f"Monthly MTD Spend: {cost_val:,.2f} {curr}",
+                                current_configuration=f"Monthly Spend: {cost_val:,.2f} {curr}",
                                 measured_value=f"High spending cloud resource ({cost_val:,.2f} {curr})",
                                 recommended_configuration="Review utilization metrics and right-size or adopt commitment discounts",
-                                recommendation=f"Resource '{res_name}' is among the top cost drivers. Evaluate optimization potential.",
-                                metric_period=f"{mtd_start} to {mtd_end}",
+                                recommendation=f"Resource '{res_name}' in resource group '{rg}' is among the top cost drivers. Evaluate optimization potential.",
+                                metric_period=f"{cost_start} to {cost_end} ({cost_month})",
                                 data_source="Azure Cost Management Query API",
                                 evidence={
                                     "actual_cost_mtd": round(cost_val, 2),
+                                    "resource_group": rg,
                                     "assessment_type": "High Cost Resource"
                                 },
                                 current_monthly_cost=round(cost_val, 2),
@@ -104,8 +124,7 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                 except Exception as ex:
                     errors.append(f"Failed to query Cost Management for sub {sub.subscription_id}: {ex}")
 
-        # If Cost Management returned no rows (e.g. newly provisioned sub, or 0 MTD records),
-        # fall back to discovered subscription resources to evaluate top opportunities
+        # 3. If Cost Management returned no rows, fall back to discovered subscription resources
         if not candidate_findings:
             for sub in context.subscriptions:
                 try:
@@ -114,9 +133,9 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                         r_id = r.get("id", "")
                         r_name = r.get("name", f"Resource-{idx}")
                         r_type = r.get("type", "Microsoft.Resources/resource")
-                        r_rg = r.get("resourceGroup", "Unknown")
+                        r_rg = _extract_resource_group(r_id, r.get("resourceGroup"))
                         r_loc = r.get("location", "global")
-                        
+
                         base_cost = 50.0
                         if "virtualmachines" in r_type.lower():
                             base_cost = 87.60
@@ -147,11 +166,12 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                                 current_configuration=f"Estimated Monthly Baseline: {base_cost:,.2f} {context.currency}",
                                 measured_value=f"Cloud resource with estimated baseline spend of {base_cost:,.2f} {context.currency}",
                                 recommended_configuration="Review utilization metrics and right-size or adopt commitment discounts",
-                                recommendation=f"Resource '{r_name}' is a primary resource in {r_rg}. Evaluate optimization potential.",
+                                recommendation=f"Resource '{r_name}' is a primary resource in resource group '{r_rg}'. Evaluate optimization potential.",
                                 metric_period="Current Billing Cycle",
                                 data_source="Azure Resource Graph & Pricing Engine",
                                 evidence={
                                     "actual_cost_mtd": round(base_cost, 2),
+                                    "resource_group": r_rg,
                                     "assessment_type": "High Cost Resource"
                                 },
                                 current_monthly_cost=round(base_cost, 2),
@@ -179,14 +199,46 @@ class Top20OpportunitiesAssessment(BaseAssessment):
         # Strictly top 20 opportunities across the entire tenant (unified tenant-level ranking)
         top_20 = candidate_findings[:20]
 
-        # Ensure each finding has assessment_type and tenant rank in evidence
+        # Ensure each finding has assessment_type, verified resource_group, and tenant rank in evidence
         for idx, f in enumerate(top_20, start=1):
-            ass_type = f.evidence.get("assessment_type") or f.category.title()
-            f.evidence["assessment_type"] = ass_type
-            f.evidence["tenant_rank"] = idx
-            f.evidence["ranking_scope"] = "Tenant Level"
-            f.finding_id = f"cost06-tenant-{idx:02d}"
-            findings.append(f)
+            ass_type = f.evidence.get("assessment_type") or f.evidence.get("opportunity_source") or f.category.title()
+            rg_verified = _extract_resource_group(f.resource_id, f.resource_group)
+
+            cloned_finding = FindingModel(
+                finding_id=f"cost06-tenant-{idx:02d}",
+                assessment_id=self.assessment_id,
+                category=self.category,
+                subscription_id=f.subscription_id,
+                subscription_name=f.subscription_name,
+                resource_group=rg_verified,
+                resource_name=f.resource_name,
+                resource_type=f.resource_type,
+                resource_id=f.resource_id,
+                region=f.region,
+                severity=f.severity,
+                status=f.status or "Optimization Opportunity",
+                current_configuration=f.current_configuration,
+                measured_value=f.measured_value,
+                recommended_configuration=f.recommended_configuration,
+                recommendation=f.recommendation,
+                metric_period=f.metric_period,
+                data_source=f.data_source,
+                evidence=dict(f.evidence or {}),
+                current_monthly_cost=f.current_monthly_cost,
+                estimated_monthly_savings=f.estimated_monthly_savings,
+                estimated_annual_savings=f.estimated_annual_savings,
+                currency=f.currency,
+                savings_type=f.savings_type or "Estimated Savings",
+                confidence=f.confidence or "High",
+                calculation_method=f.calculation_method,
+                validation_required=f.validation_required,
+                collected_at=f.collected_at or now_str
+            )
+            cloned_finding.evidence["assessment_type"] = ass_type
+            cloned_finding.evidence["tenant_rank"] = idx
+            cloned_finding.evidence["ranking_scope"] = "Tenant Level"
+            cloned_finding.evidence["resource_group"] = rg_verified
+            findings.append(cloned_finding)
 
         total_monthly = sum((f.estimated_monthly_savings or 0.0) for f in findings)
         status = AssessmentStatus.COMPLETED if findings else AssessmentStatus.NO_FINDINGS

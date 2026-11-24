@@ -11,7 +11,6 @@ from .database_usage import DatabaseUsageAssessment
 from .new_unused_resources import NewUnusedResourcesAssessment
 from .storage_lifecycle import StorageLifecycleAssessment
 from .database_allocated_usage import DatabaseAllocatedUsageAssessment
-from .database_sku import DatabaseSkuAssessment
 from .backup_status import BackupStatusAssessment
 from .old_snapshots import OldSnapshotsAssessment
 from .function_apps import FunctionAppsAssessment
@@ -32,7 +31,6 @@ __all__ = [
     "NewUnusedResourcesAssessment",
     "StorageLifecycleAssessment",
     "DatabaseAllocatedUsageAssessment",
-    "DatabaseSkuAssessment",
     "BackupStatusAssessment",
     "OldSnapshotsAssessment",
     "FunctionAppsAssessment",

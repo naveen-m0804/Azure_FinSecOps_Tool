@@ -159,7 +159,7 @@ function showToast(message, type = "info", duration = 7000) {
     toast.style.opacity = "0";
     toast.style.transform = "translateX(20px)";
     setTimeout(() => {
-      try { toast.remove(); } catch (e) {}
+      try { toast.remove(); } catch (e) { }
     }, 250);
   };
 
@@ -256,7 +256,7 @@ async function restoreSessionState() {
 function clearSessionState() {
   try {
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
-  } catch (e) {}
+  } catch (e) { }
 }
 
 // ============================================================
@@ -267,7 +267,7 @@ function switchTab(tabId) {
   const shortName = tabId.replace("tab-", "");
   try {
     history.replaceState(null, null, `#${shortName}`);
-  } catch (e) {}
+  } catch (e) { }
 
   const tabs = document.querySelectorAll(".nav-tab-btn");
   tabs.forEach(btn => {
@@ -552,7 +552,7 @@ function updateSubscriptionCountBadge() {
 // ============================================================
 // ENVIRONMENT EVALUATION TAGS PILLS MANAGER
 // ============================================================
-window.addExampleTag = function(tagName) {
+window.addExampleTag = function (tagName) {
   if (!tagName) return;
   const tag = tagName.trim();
   if (!state.configuredTags.includes(tag)) {
@@ -561,12 +561,12 @@ window.addExampleTag = function(tagName) {
   }
 };
 
-window.removeTag = function(tagToRemove) {
+window.removeTag = function (tagToRemove) {
   state.configuredTags = state.configuredTags.filter(t => t !== tagToRemove);
   renderTagPills();
 };
 
-window.handleAddTagInput = function() {
+window.handleAddTagInput = function () {
   const tagInput = document.getElementById("tagInput");
   if (!tagInput) return;
   const raw = tagInput.value.trim();
@@ -607,7 +607,7 @@ function initTagsManager() {
   try {
     const raw = sessionStorage.getItem("azure_finsecops_tags");
     if (raw) savedTags = JSON.parse(raw);
-  } catch (e) {}
+  } catch (e) { }
 
   state.configuredTags = Array.isArray(savedTags) ? savedTags : [];
 
@@ -615,7 +615,7 @@ function initTagsManager() {
   const addBtn = document.getElementById("btnAddTag");
 
   if (addBtn) {
-    addBtn.onclick = function(e) {
+    addBtn.onclick = function (e) {
       if (e) {
         e.preventDefault();
         e.stopPropagation();
@@ -625,7 +625,7 @@ function initTagsManager() {
   }
 
   if (tagInput) {
-    tagInput.onkeydown = function(e) {
+    tagInput.onkeydown = function (e) {
       if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
@@ -650,7 +650,7 @@ function renderTagPills() {
 
   try {
     sessionStorage.setItem("azure_finsecops_tags", JSON.stringify(state.configuredTags));
-  } catch (e) {}
+  } catch (e) { }
 
   if (hintText) {
     if (state.configuredTags.length > 0) {
@@ -740,8 +740,8 @@ async function handleConnect(event) {
   const tenantId = document.getElementById("tenantId").value.trim();
   const clientId = document.getElementById("clientId").value.trim();
   const clientSecret = document.getElementById("clientSecret").value.trim();
-  const targetTags = state.configuredTags && state.configuredTags.length > 0 
-    ? state.configuredTags.join(", ") 
+  const targetTags = state.configuredTags && state.configuredTags.length > 0
+    ? state.configuredTags.join(", ")
     : (document.getElementById("targetTags")?.value || "").trim();
 
   const validationErrors = [];
@@ -988,7 +988,7 @@ async function handleDisconnect() {
   try {
     sessionStorage.clear();
     localStorage.removeItem("azure_finsecops_tags");
-  } catch (e) {}
+  } catch (e) { }
 
   // Hide any lingering alerts
   const alertBox = document.getElementById("connectionAlert");
@@ -1086,8 +1086,8 @@ function renderSecurityCards(filterText = "") {
     const scoreImpactVal = (res && res.security_score_improvement)
       ? res.security_score_improvement
       : (res && res.findings && res.findings.length > 0
-          ? res.findings.reduce((acc, f) => acc + (Number(f.security_score_impact) || 0), 0)
-          : 0);
+        ? res.findings.reduce((acc, f) => acc + (Number(f.security_score_impact) || 0), 0)
+        : 0);
     const scoreImpact = scoreImpactVal > 0
       ? `+${scoreImpactVal.toFixed(1)}%`
       : "--";
@@ -1244,8 +1244,8 @@ function updateAssessmentCardInPlace(assessmentId) {
       const scoreImpactVal = (res && res.security_score_improvement)
         ? res.security_score_improvement
         : (res && res.findings && res.findings.length > 0
-            ? res.findings.reduce((acc, f) => acc + (Number(f.security_score_impact) || 0), 0)
-            : 0);
+          ? res.findings.reduce((acc, f) => acc + (Number(f.security_score_impact) || 0), 0)
+          : 0);
       const scoreImpact = scoreImpactVal > 0 ? `+${scoreImpactVal.toFixed(1)}%` : "--";
       metaRow.innerHTML = `
         <span class="ass-meta-findings">Findings: <b>${findingsCount}</b></span>
@@ -1637,7 +1637,7 @@ async function handleJobCompletion(jobId) {
     const data = await res.json();
     // Merge results with existing ones
     state.results = Object.assign({}, state.results, data.results || {});
-    
+
     // Smart-merge summary so running cost doesn't wipe security metrics, and vice versa
     const oldSummary = state.summary || {};
     const newSummary = data.summary || {};
@@ -1667,7 +1667,7 @@ async function handleJobCompletion(jobId) {
 
     // If new job is security-only (no cost savings produced), preserve previous cost metrics
     if ((newSummary.total_monthly_savings === null || newSummary.total_monthly_savings === undefined || newSummary.total_monthly_savings === 0) &&
-        (oldSummary.total_monthly_savings || oldSummary.current_cost_wastage)) {
+      (oldSummary.total_monthly_savings || oldSummary.current_cost_wastage)) {
       mergedSummary.total_monthly_savings = oldSummary.total_monthly_savings;
       mergedSummary.total_annual_savings = oldSummary.total_annual_savings;
       mergedSummary.current_cost_wastage = oldSummary.current_cost_wastage;
@@ -1948,7 +1948,7 @@ const SECURITY_COLUMNS_SPEC = {
       f.evidence?.recommendation_name || f.resource_name,
       getSeverityBadge(f.severity),
       f.status,
-      f.evidence?.first_detected_date || f.collected_at?.slice(0, 10) || "--",
+      f.evidence?.first_detected_date || "--",
       f.evidence?.description || f.current_configuration || "--",
       f.recommendation,
       f.evidence?.security_control || "--",
@@ -1971,7 +1971,7 @@ const SECURITY_COLUMNS_SPEC = {
     ]
   },
   "high_priority_recommendations": {
-    columns: ["Subscription Name", "Resource Group", "Resource Name", "Resource Type", "Recommendation Name", "Severity", "Risk Level", "Description", "Azure Remediation Recommendation", "Related Control", "Score Potential"],
+    columns: ["Subscription Name", "Resource Group", "Resource Name", "Resource Type", "Recommendation", "Severity", "Description", "Azure Remediation", "Related Security Control"],
     extractor: (f) => [
       f.subscription_name,
       f.resource_group || "--",
@@ -1979,11 +1979,9 @@ const SECURITY_COLUMNS_SPEC = {
       f.resource_type?.split("/").pop() || f.resource_type,
       f.evidence?.recommendation_name || f.resource_name,
       getSeverityBadge(f.severity),
-      f.evidence?.risk_level || f.severity,
       f.evidence?.description || f.current_configuration || "--",
-      f.recommendation,
-      f.evidence?.security_control || "--",
-      f.security_score_impact ? `+${f.security_score_impact.toFixed(1)}%` : (f.evidence?.potential_score_increase || "--")
+      f.evidence?.remediation || f.recommendation || "--",
+      f.evidence?.security_control || "--"
     ]
   },
   "service_retirement": {
@@ -2034,23 +2032,20 @@ const SECURITY_COLUMNS_SPEC = {
     ]
   },
   "vm_os_version": {
-    columns: ["Subscription Name", "Resource Group", "Virtual Machine Name", "Region", "Operating System", "OS Version", "OS Build", "Publisher", "Image Version", "Support Status", "End-of-Support Date"],
+    columns: ["Subscription Name", "Resource Group", "Virtual Machine Name", "Region", "Operating System", "OS Version", "OS Build", "Publisher"],
     extractor: (f) => [
       f.subscription_name,
       f.resource_group || "--",
       f.resource_name,
       f.region || "global",
-      f.evidence?.os_type || f.evidence?.offer || "Windows / Linux",
+      f.evidence?.os_type || f.evidence?.os_name || "Windows / Linux",
       f.evidence?.os_version || f.evidence?.sku || f.current_configuration || "--",
       f.evidence?.os_build || "--",
-      f.evidence?.publisher || "--",
-      f.evidence?.image_version || "--",
-      f.status,
-      f.evidence?.end_of_support_date || "--"
+      f.evidence?.publisher || "--"
     ]
   },
   "vm_patching": {
-    columns: ["Subscription Name", "Resource Group", "Virtual Machine Name", "Region", "Operating System", "OS Version", "Patch Status", "Last Assessment Date", "Missing Security Updates", "Missing Critical Updates", "Reboot Required", "Overall Status"],
+    columns: ["Subscription Name", "Resource Group", "Virtual Machine Name", "Region", "Operating System", "OS Version", "Patch Assessment Status", "Last Assessment Date", "Missing Security Updates", "Missing Critical Updates", "Reboot Required", "Patch Status"],
     extractor: (f) => [
       f.subscription_name,
       f.resource_group || "--",
@@ -2058,12 +2053,12 @@ const SECURITY_COLUMNS_SPEC = {
       f.region || "global",
       f.evidence?.os_type || "Windows / Linux",
       f.evidence?.os_version || "--",
-      f.status,
+      f.evidence?.assessment_status || "Succeeded",
       f.evidence?.last_assessment_date || f.collected_at?.slice(0, 10) || "--",
       f.evidence?.security_updates !== undefined ? f.evidence.security_updates : "--",
       f.evidence?.critical_updates !== undefined ? f.evidence.critical_updates : "--",
       f.evidence?.reboot_required !== undefined ? (f.evidence.reboot_required ? "Yes" : "No") : "--",
-      f.status
+      f.evidence?.patch_status || f.status || "Action Required"
     ]
   },
   "software_upgrades": {
@@ -2157,9 +2152,19 @@ const SECURITY_COLUMNS_SPEC = {
   }
 };
 
+function getLastMonthCostLabel() {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `Cost (${mm}/${yyyy})`;
+}
+const COST_COL_HEADER = getLastMonthCostLabel();
+
 const COST_COLUMNS_SPEC = {
   "underutilized_vms": {
-    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "CPU Utilization", "Memory Utilization", "Cost", "Est. Annual Savings"],
+    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "CPU Utilization", "Memory Utilization", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
@@ -2173,7 +2178,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "orphan_resources": {
-    columns: ["Resource Name", "Resource Type", "Subscription", "Resource Group", "Environment", "Resource Status", "Cost", "Est. Annual Savings"],
+    columns: ["Resource Name", "Resource Type", "Subscription", "Resource Group", "Environment", "Resource Status", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.resource_type?.toLowerCase().includes("serverfarms") ? "App Service Plan" : (f.resource_type?.split("/").pop() || f.resource_type),
@@ -2186,7 +2191,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "underutilized_data_disks": {
-    columns: ["Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Disk Size", "IOPS Utilization", "Cost", "Est. Annual Savings"],
+    columns: ["Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Disk Size", "IOPS Utilization", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.evidence?.vm_name || f.evidence?.attached_vm || "Attached",
@@ -2201,7 +2206,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "underutilized_os_disks": {
-    columns: ["OS Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Disk Size", "Cost", "Est. Annual Savings"],
+    columns: ["OS Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Disk Size", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.evidence?.vm_name || "Primary VM",
@@ -2239,7 +2244,7 @@ const COST_COLUMNS_SPEC = {
     }
   },
   "top_20_opportunities": {
-    columns: ["Resource Name", "Assessment Type", "Subscription", "Resource Group", "Environment", "Current Configuration", "Cost", "Est. Annual Savings"],
+    columns: ["Resource Name", "Assessment Type", "Subscription", "Resource Group", "Environment", "Current Configuration", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.evidence?.assessment_type || "Compute Optimization",
@@ -2252,7 +2257,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "vm_license_ahb": {
-    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "License Status", "Cost", "Est. Annual Savings"],
+    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "License Status", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
@@ -2265,7 +2270,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "auto_shutdown": {
-    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "Deallocated Status", "Auto Shutdown Enabled", "Scheduled Shutdown Time", "Cost", "Est. Annual Savings"],
+    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "Deallocated Status", "Auto Shutdown Enabled", "Scheduled Shutdown Time", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
@@ -2280,7 +2285,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "disk_space": {
-    columns: ["VM Name", "Disk Name", "Subscription", "Resource Group", "Environment", "Total Capacity", "Used Space", "Free Space", "Utilization (%)", "Cost"],
+    columns: ["VM Name", "Disk Name", "Subscription", "Resource Group", "Environment", "Total Capacity", "Used Space", "Free Space", "Utilization (%)", COST_COL_HEADER],
     extractor: (f) => [
       f.evidence?.vm_name || "Host VM",
       f.resource_name,
@@ -2295,7 +2300,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "database_usage": {
-    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Database Tier", "CPU / DTU Utilization", "Storage Utilization", "Cost", "Est. Annual Savings"],
+    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Database Tier", "CPU / DTU Utilization", "Storage Utilization", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
@@ -2309,7 +2314,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "new_unused_resources": {
-    columns: ["Resource Name", "Resource Type", "Subscription", "Resource Group", "Environment", "Creation Date", "Last Activity", "Days Inactive", "Unwanted Asset Status", "Cost", "Est. Annual Savings"],
+    columns: ["Resource Name", "Resource Type", "Subscription", "Resource Group", "Environment", "Creation Date", "Last Activity", "Days Inactive", "Unwanted Asset Status", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.resource_type?.split("/").pop() || f.resource_type,
@@ -2325,21 +2330,22 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "storage_lifecycle": {
-    columns: ["Storage Account", "Subscription", "Resource Group", "Environment", "Storage Tier", "Access Tier", "Redundancy", "Cost", "Est. Annual Savings"],
+    columns: ["Storage Account", "Resource Type", "Subscription", "Resource Group", "Environment", "LCM Status", "Total Rules", "Active Rules", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
+      f.evidence?.resource_type || "Storage Account",
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
       f.evidence?.environment || "Production",
-      f.evidence?.storage_tier || "Standard",
-      f.evidence?.access_tier || "Hot",
-      f.evidence?.redundancy || "GRS",
+      f.evidence?.lcm_status || f.status || "Not Configured",
+      f.evidence?.total_rules !== undefined ? String(f.evidence.total_rules) : "0",
+      f.evidence?.active_rules !== undefined ? String(f.evidence.active_rules) : (f.evidence?.enabled_rules !== undefined ? String(f.evidence.enabled_rules) : "0"),
       formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
   "database_allocated_usage": {
-    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Allocated Storage", "Used Storage", "Storage Utilization (%)", "Cost", "Est. Annual Savings"],
+    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Allocated Storage", "Used Storage", "Storage Utilization (%)", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
@@ -2352,37 +2358,23 @@ const COST_COLUMNS_SPEC = {
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
-  "database_sku": {
-    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Current SKU", "CPU Utilization", "Storage Utilization", "Cost", "Est. Annual Savings"],
-    extractor: (f) => [
-      f.resource_name,
-      f.subscription_name || f.subscription_id,
-      f.resource_group || "--",
-      f.evidence?.environment || "--",
-      f.evidence?.current_sku || "--",
-      f.evidence?.avg_cpu_pct !== undefined ? `Avg ${f.evidence.avg_cpu_pct}%` : "--",
-      f.evidence?.storage_utilization_pct !== undefined ? `${f.evidence.storage_utilization_pct}%` : "--",
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
-      `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
-    ]
-  },
   "backup_status": {
-    columns: ["Resource Name", "Subscription", "Resource Group", "Environment", "Backup Status", "Backup Policy", "Retention Period", "Backup Storage Used", "Cost", "Est. Annual Savings"],
+    columns: ["Resource Name", "Subscription", "Resource Group", "Environment", "Backup Status", "Backup Policy", "Retention Period", "Backup Storage Used", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
       f.evidence?.environment || "--",
       f.evidence?.backup_status || f.status || "--",
-      f.evidence?.backup_policy || "--",
-      f.evidence?.retention_days !== undefined ? `${f.evidence.retention_days} days` : "--",
-      f.evidence?.backup_storage_tb !== undefined ? `${f.evidence.backup_storage_tb} TB` : "--",
+      f.evidence?.backup_policy || f.evidence?.policy_name || "--",
+      f.evidence?.retention_display || (f.evidence?.retention_days !== undefined && f.evidence?.retention_days !== null ? `${f.evidence.retention_days} days` : "--"),
+      f.evidence?.backup_storage_tb !== undefined && f.evidence?.backup_storage_tb !== null ? `${f.evidence.backup_storage_tb} TB` : (f.evidence?.backup_storage_gb !== undefined && f.evidence?.backup_storage_gb !== null ? `${f.evidence.backup_storage_gb} GB` : "Telemetry Unavailable"),
       formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
   "old_snapshots": {
-    columns: ["Snapshot Name", "Source Disk", "Subscription", "Resource Group", "Environment", "Snapshot Age", "Snapshot Size", "Cost", "Est. Annual Savings"],
+    columns: ["Snapshot Name", "Source Disk", "Subscription", "Resource Group", "Environment", "Snapshot Age (> 365 Days)", "Snapshot Size", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.evidence?.source_disk || "--",
@@ -2396,7 +2388,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "function_apps": {
-    columns: ["Function App Name", "Subscription", "Resource Group", "Environment", "Hosting Plan", "Execution Count", "Average Execution Duration", "Cost", "Est. Annual Savings"],
+    columns: ["Function App Name", "Subscription", "Resource Group", "Environment", "Hosting Plan", "Execution Count", "Average Execution Duration", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
@@ -2410,7 +2402,7 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "auto_start_vm": {
-    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "Auto Start Status", "Configured Start Time", "Cost", "Est. Annual Cost Impact"],
+    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "Auto Start Status", "Configured Start Time", COST_COL_HEADER, "Est. Annual Cost Impact"],
     extractor: (f) => {
       const annualImpact = f.evidence?.annual_cost_impact ?? f.estimated_annual_savings ?? 0;
       return [
@@ -2427,7 +2419,7 @@ const COST_COLUMNS_SPEC = {
     }
   },
   "non_lrs_storage_redundancy": {
-    columns: ["Storage Account", "Subscription", "Resource Group", "Environment", "Current Redundancy", "Required Redundancy", "Cost", "Est. Annual Savings"],
+    columns: ["Storage Account", "Subscription", "Resource Group", "Environment", "Current Redundancy", "Required Redundancy", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
@@ -3386,7 +3378,7 @@ function renderSchedulesTable(schedules) {
     if (s.scope === "security") scopeBadge = '<span class="badge-scope badge-scope-security">Security</span>';
     if (s.scope === "cost") scopeBadge = '<span class="badge-scope badge-scope-cost">FinOps Cost</span>';
 
-    const statusBadge = s.status === "Active" 
+    const statusBadge = s.status === "Active"
       ? '<span class="badge-status active"><i class="fa-solid fa-circle-play"></i> Active</span>'
       : '<span class="badge-status paused"><i class="fa-solid fa-circle-pause"></i> Paused</span>';
 

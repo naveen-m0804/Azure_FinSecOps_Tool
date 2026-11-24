@@ -278,19 +278,20 @@ class ToolRegistry:
         self.register(
             name="azure_get_resource_metrics",
             description=(
-                "Retrieves Azure Monitor performance metrics (such as 'Percentage CPU', 'Network In Total', 'Disk Read Bytes') "
-                "for a specific Azure resource to verify actual utilization or diagnose performance issues."
+                "Retrieves Azure Monitor host platform performance metrics (such as 'Percentage CPU', 'Network In Total', 'Network Out Total', 'Disk Read Bytes', 'Disk Write Bytes') "
+                "directly from the Azure hypervisor without requiring in-guest agents (AMA, WAD, or DCR). "
+                "Use to verify actual compute, network, or disk utilization."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "resource_id": {
                         "type": "string",
-                        "description": "Full ARM resource ID of the target resource."
+                        "description": "Full ARM resource ID or VM name of the target resource."
                     },
                     "metric_names": {
                         "type": "string",
-                        "description": "Comma-separated metric names (e.g. 'Percentage CPU' or 'Disk Read Bytes,Disk Write Bytes')."
+                        "description": "Comma-separated metric names (e.g. 'Percentage CPU' or 'Percentage CPU,Network In Total,Disk Read Bytes')."
                     },
                     "hours": {
                         "type": ["integer", "null"],
@@ -457,6 +458,107 @@ class ToolRegistry:
             },
             handler=self._handle_search_knowledge,
             category="knowledge_base"
+        )
+
+        # -------------------------------------------------------------
+        # 13. Dynamic Generic Azure Resource Manager (ARM) Query
+        # -------------------------------------------------------------
+        self.register(
+            name="azure_generic_arm_query",
+            description=(
+                "Executes a dynamic, read-only Azure Resource Manager REST API GET query for ANY Azure resource type, "
+                "management endpoint, or platform service (e.g. Key Vaults, AKS Clusters, SQL Databases, Cosmos DB, "
+                "Application Gateways, Role Assignments, Diagnostic Settings, etc.) across authorized subscriptions. "
+                "Use when the user asks about an Azure service or property not covered by other specific tools."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "subscription_id": {
+                        "type": "string",
+                        "description": "Target subscription GUID (optional; uses first authorized subscription if omitted)."
+                    },
+                    "relative_path": {
+                        "type": "string",
+                        "description": "Relative ARM URI path (e.g. '/providers/Microsoft.KeyVault/vaults', '/resourceGroups/rg1/providers/Microsoft.Sql/servers', '/providers/Microsoft.Authorization/roleAssignments')."
+                    },
+                    "api_version": {
+                        "type": "string",
+                        "description": "Target Azure Resource Provider API version (e.g. '2023-07-01', '2022-05-01-preview', '2021-04-01')."
+                    },
+                    "query_params": {
+                        "type": "object",
+                        "description": "Optional query string parameters (e.g. {'$filter': '...', '$expand': '...'})"
+                    }
+                },
+                "required": ["relative_path"]
+            },
+            handler=self._handle_generic_arm_query,
+            category="azure_dynamic"
+        )
+
+        # -------------------------------------------------------------
+        # 14. Dynamic On-Demand Assessment Execution
+        # -------------------------------------------------------------
+        self.register(
+            name="azure_run_assessment_module",
+            description=(
+                "Dynamically executes any of the 32 real-time FinSecOps assessment modules on demand "
+                "(e.g. 'service_retirement', 'vm_os_version', 'disk_encryption', 'underutilized_vms', "
+                "'backup_status', 'tls_version', 'keyvault_rbac', 'contributor_rbac', etc.) against the customer's "
+                "connected subscriptions. Returns live findings, compliance posture, and remediation recommendations."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "assessment_id": {
+                        "type": "string",
+                        "description": "Identifier of the assessment module to execute (e.g. 'service_retirement', 'vm_os_version', 'disk_encryption', 'underutilized_vms', 'tls_version', 'backup_status', etc.)."
+                    },
+                    "target_subscription_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of subscription IDs to scope the assessment to."
+                    }
+                },
+                "required": ["assessment_id"]
+            },
+            handler=self._handle_run_assessment_module,
+            category="assessment_execution"
+        )
+
+        # -------------------------------------------------------------
+        # 15. Dynamic Multi-Vector Cloud Investigation Agent
+        # -------------------------------------------------------------
+        self.register(
+            name="azure_dynamic_environment_analyst",
+            description=(
+                "Autonomous dynamic investigation agent: conducts an in-depth, multi-dimensional audit of any arbitrary "
+                "resource group, service category (e.g., 'databases', 'containers', 'keyvaults', 'networking'), "
+                "or security/cost domain. Correlates resource inventories, live Defender security alerts, Advisor recommendations, "
+                "and configurations across the specified scope and produces an actionable, consolidated report."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "focus_area": {
+                        "type": "string",
+                        "description": "The specific area or service to investigate (e.g. 'key vaults', 'databases', 'aks', 'public IP exposure', 'rg-production', 'unattached disks')."
+                    },
+                    "scope_type": {
+                        "type": "string",
+                        "enum": ["resource_group", "service_type", "security_posture", "cost_anomaly", "custom_kql"],
+                        "description": "Category of investigation."
+                    },
+                    "scope_filter": {
+                        "type": "string",
+                        "description": "Optional specific resource group name or service filter."
+                    }
+                },
+                "required": ["focus_area"]
+            },
+            handler=self._handle_dynamic_investigation,
+            category="autonomous_agent"
         )
 
     # --------------------------------------------------------------------------
@@ -781,15 +883,37 @@ class ToolRegistry:
         if not client:
             return {"success": False, "error": "No active Azure connection in workspace."}
 
-        res_id = args.get("resource_id", "")
-        metric_names = args.get("metric_names", "Percentage CPU")
-        hours = args.get("hours", 24)
+        res_id = str(args.get("resource_id", "")).strip()
+        metric_names = str(args.get("metric_names", "Percentage CPU")).strip()
+        hours = int(args.get("hours") or 24)
+
+        # 1. Dynamically resolve simple VM or resource name to full ARM resource ID if necessary
+        if res_id and not res_id.lower().startswith("/subscriptions/") and not res_id.lower().startswith("subscriptions/"):
+            resolved_id = None
+            for sid in ctx.get_authorized_subscription_ids():
+                try:
+                    from app.azure.compute import ComputeAdapter
+                    vms = await ComputeAdapter.get_vms(client, sid)
+                    for vm in vms:
+                        if vm.get("name", "").lower() == res_id.lower():
+                            resolved_id = vm.get("id")
+                            break
+                    if resolved_id:
+                        break
+                except Exception:
+                    pass
+            if resolved_id:
+                res_id = resolved_id
+
+        if not res_id:
+            return {"success": False, "error": "Missing or invalid resource_id parameter."}
 
         now = datetime.datetime.now(datetime.timezone.utc)
         start = now - datetime.timedelta(hours=hours)
         start_str = start.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # 2. Query Azure Monitor Metrics API
         res = await MonitorAdapter.get_metrics(
             client=client,
             resource_id=res_id,
@@ -799,13 +923,38 @@ class ToolRegistry:
             time_grain="PT1H",
             aggregation="Average"
         )
+
+        # 3. Fallback for Virtual Machines: if initial query failed, query standard host platform metrics
+        # Host platform metrics are emitted directly by the Azure hypervisor without AMA, WAD, or DCR.
+        if (not res.get("success") or not res.get("metrics")) and "/virtualmachines/" in res_id.lower():
+            fallback_metrics = "Percentage CPU,Network In Total,Network Out Total,Disk Read Bytes,Disk Write Bytes"
+            res = await MonitorAdapter.get_metrics(
+                client=client,
+                resource_id=res_id,
+                metric_names=fallback_metrics,
+                start_time=start_str,
+                end_time=end_str,
+                time_grain="PT1H",
+                aggregation="Average"
+            )
+
+        if not res.get("success"):
+            err_msg = res.get("error") or "Azure Monitor Metrics query failed."
+            return {
+                "success": False,
+                "error": err_msg,
+                "resource_id": res_id,
+                "note": "Host platform metrics (Percentage CPU, Disk I/O, Network I/O) are collected by default from the Azure hypervisor without agents."
+            }
+
         return {
-            "success": res.get("success", False),
+            "success": True,
             "resource_id": res_id,
             "metrics": res.get("metrics", {}),
             "hours": hours,
             "is_live_data": True,
-            "source": "Azure Monitor Metrics API"
+            "source": "Azure Monitor Metrics API (Hypervisor Host Platform Metrics)",
+            "telemetry_note": "Host platform metrics (CPU, Disk, Network) are retrieved directly from the Azure hypervisor without needing Azure Monitor Agent (AMA), WAD, or Data Collection Rules (DCR)."
         }
 
     async def _handle_get_advisor_recommendations(self, args: Dict[str, Any], ctx: ToolExecutionContext) -> Dict[str, Any]:
@@ -1109,6 +1258,173 @@ class ToolRegistry:
             "query": query,
             "documents": docs,
             "source": "Microsoft Learn & Azure Architecture Center (Knowledge Base)"
+        }
+
+    async def _handle_generic_arm_query(self, args: Dict[str, Any], ctx: ToolExecutionContext) -> Dict[str, Any]:
+        client = await ctx.get_azure_client()
+        if not client:
+            return {
+                "success": False,
+                "error": "No active Azure connection in this workspace. Please connect using your Tenant ID and Service Principal."
+            }
+
+        authorized_subs = ctx.get_authorized_subscription_ids()
+        if not authorized_subs:
+            return {"success": False, "error": "No authorized Azure subscriptions in active workspace context."}
+
+        target_sub = args.get("subscription_id") or authorized_subs[0]
+        try:
+            validated_subs = FinSecOpsGuardrails.validate_subscription_access([target_sub], ctx.subscriptions)
+            sub_id = validated_subs[0]
+        except SecurityPolicyViolationError as sve:
+            return {"success": False, "error": str(sve), "is_security_violation": True}
+
+        rel_path = str(args.get("relative_path") or "").strip()
+        if not rel_path.startswith("/"):
+            rel_path = f"/{rel_path}"
+
+        if rel_path.lower().startswith("/subscriptions/"):
+            url = f"https://management.azure.com{rel_path}"
+        else:
+            url = f"https://management.azure.com/subscriptions/{sub_id}{rel_path}"
+
+        params: Dict[str, str] = {}
+        api_ver = args.get("api_version")
+        if api_ver:
+            params["api-version"] = str(api_ver).strip()
+        elif "api-version" not in url.lower():
+            params["api-version"] = "2021-04-01"
+
+        query_params = args.get("query_params") or {}
+        if isinstance(query_params, dict):
+            for k, v in query_params.items():
+                params[k] = str(v)
+
+        try:
+            resp = await client.execute_request("GET", url, params=params if params and "?" not in url else None)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("value") if isinstance(data, dict) and "value" in data else data
+                item_count = len(items) if isinstance(items, list) else 1
+                return {
+                    "success": True,
+                    "subscription_id": sub_id,
+                    "target_url": url,
+                    "count": item_count,
+                    "data": items,
+                    "source": "Azure Resource Manager REST API"
+                }
+            return {
+                "success": False,
+                "error": f"Azure ARM returned HTTP {resp.status_code}: {resp.text[:300]}",
+                "status_code": resp.status_code
+            }
+        except Exception as ex:
+            return {"success": False, "error": f"ARM query execution failed: {str(ex)}"}
+
+    async def _handle_run_assessment_module(self, args: Dict[str, Any], ctx: ToolExecutionContext) -> Dict[str, Any]:
+        client = await ctx.get_azure_client()
+        if not client:
+            return {
+                "success": False,
+                "error": "No active Azure connection in this workspace. Please connect using your Tenant ID and Service Principal."
+            }
+
+        from app.assessments.registry import assessment_registry
+        from app.assessments.base import AssessmentContext
+
+        assessment_id = str(args.get("assessment_id") or "").strip().lower()
+        ass = assessment_registry.get_assessment(assessment_id)
+        if not ass:
+            available = [a.assessment_id for a in assessment_registry.get_all_assessments()]
+            return {
+                "success": False,
+                "error": f"Assessment '{assessment_id}' not found. Available modules: {', '.join(available[:10])}..."
+            }
+
+        target_subs = args.get("target_subscription_ids") or []
+        validated_subs = FinSecOpsGuardrails.validate_subscription_access(target_subs, ctx.subscriptions)
+        sub_models = [s for s in ctx.subscriptions if getattr(s, "subscription_id", None) in validated_subs or (isinstance(s, dict) and s.get("subscription_id") in validated_subs)]
+
+        assessment_ctx = AssessmentContext(
+            connection_id=ctx.connection_data.get("connection_id", "live-query"),
+            workspace_name=ctx.workspace_name,
+            tenant_id=ctx.tenant_id or "",
+            subscriptions=sub_models,
+            client=client,
+            currency=ctx.currency
+        )
+
+        try:
+            res = await ass.run(assessment_ctx)
+            top_findings = [f.model_dump() if hasattr(f, "model_dump") else str(f) for f in res.findings[:8]]
+            return {
+                "success": True,
+                "assessment_id": res.assessment_id,
+                "code": res.code,
+                "category": res.category,
+                "name": res.name,
+                "status": res.status.value if hasattr(res.status, "value") else str(res.status),
+                "findings_count": res.findings_count,
+                "resources_evaluated": res.resources_evaluated,
+                "execution_time_seconds": res.execution_time_seconds,
+                "sample_findings": top_findings,
+                "source": f"Live FinSecOps Assessment Engine ({res.code} - {res.name})"
+            }
+        except Exception as ex:
+            return {"success": False, "error": f"Assessment execution failed: {str(ex)}"}
+
+    async def _handle_dynamic_investigation(self, args: Dict[str, Any], ctx: ToolExecutionContext) -> Dict[str, Any]:
+        client = await ctx.get_azure_client()
+        if not client:
+            return {
+                "success": False,
+                "error": "No active Azure connection in this workspace. Please connect using your Tenant ID and Service Principal."
+            }
+
+        focus_area = str(args.get("focus_area") or "").strip()
+        scope_type = str(args.get("scope_type") or "custom_kql").lower()
+        scope_filter = str(args.get("scope_filter") or "").strip()
+
+        authorized_subs = ctx.get_authorized_subscription_ids()
+        if not authorized_subs:
+            return {"success": False, "error": "No authorized Azure subscriptions in active workspace context."}
+
+        focus_lower = focus_area.lower()
+        if "rg" in focus_lower or "resource group" in focus_lower or scope_type == "resource_group":
+            rg_name = scope_filter or focus_area.replace("resource group", "").replace("rg", "").strip().strip("'-_ ")
+            kql = f"resources | where resourceGroup =~ '{rg_name}' | project id, name, type, location, tags, properties"
+        elif "key vault" in focus_lower or "vault" in focus_lower:
+            kql = "resources | where type =~ 'microsoft.keyvault/vaults' | project id, name, type, location, properties"
+        elif "sql" in focus_lower or "database" in focus_lower:
+            kql = "resources | where type in~ ('microsoft.sql/servers', 'microsoft.sql/servers/databases', 'microsoft.dbforpostgresql/flexibleservers', 'microsoft.dbformysql/flexibleservers') | project id, name, type, location, sku, properties"
+        elif "aks" in focus_lower or "kubernetes" in focus_lower or "container" in focus_lower:
+            kql = "resources | where type in~ ('microsoft.containerservice/managedclusters', 'microsoft.containerinstance/containergroups') | project id, name, type, location, properties"
+        elif "public ip" in focus_lower or "network" in focus_lower:
+            kql = "resources | where type in~ ('microsoft.network/publicipaddresses', 'microsoft.network/networksecuritygroups', 'microsoft.network/applicationgateways', 'microsoft.network/loadbalancers') | project id, name, type, location, properties"
+        else:
+            kql = f"resources | where name contains '{focus_area}' or type contains '{focus_area}' or resourceGroup contains '{focus_area}' | take 50 | project id, name, type, resourceGroup, location, properties"
+
+        rg_result = await self._handle_resource_graph_query({"query": kql}, ctx)
+        discovered_resources = rg_result.get("data", []) if rg_result.get("success") else []
+
+        adv_result = await self._handle_advisor_recommendations({}, ctx)
+        advisor_recs = adv_result.get("recommendations", []) if adv_result.get("success") else []
+        matching_advisor = [r for r in advisor_recs if any(term in str(r).lower() for term in [focus_lower, scope_filter.lower()])][:5]
+
+        def_result = await self._handle_defender_posture({"scope": "assessments"}, ctx)
+        defender_findings = def_result.get("assessments", []) if def_result.get("success") else []
+        matching_defender = [d for d in defender_findings if any(term in str(d).lower() for term in [focus_lower, scope_filter.lower()])][:5]
+
+        return {
+            "success": True,
+            "investigation_focus": focus_area,
+            "scope_type": scope_type,
+            "resources_found_count": len(discovered_resources),
+            "discovered_resources": discovered_resources[:20],
+            "correlated_advisor_recommendations": matching_advisor,
+            "correlated_defender_assessments": matching_defender,
+            "source": "Dynamic Cloud Investigation Agent (ARG + Advisor + Defender)"
         }
 
 # Global singleton instance of tool registry

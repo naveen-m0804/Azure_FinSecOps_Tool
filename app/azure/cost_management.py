@@ -80,6 +80,26 @@ class CostManagementAdapter:
     _sem_per_loop: Dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
 
     @classmethod
+    def get_last_completed_month_date_range(
+        cls,
+        ref_date: Optional[datetime.date] = None
+    ) -> Tuple[str, str, str]:
+        """
+        Returns (start_date, end_date, mmyyyy_label) for the last completed full calendar month.
+        Example: If running on November 23, 2026, it returns:
+        ('2026-10-01', '2026-10-31', '10/2026')
+        """
+        if ref_date is None:
+            ref_date = datetime.date.today()
+        first_of_current = ref_date.replace(day=1)
+        last_of_prev = first_of_current - datetime.timedelta(days=1)
+        first_of_prev = last_of_prev.replace(day=1)
+        start_date = first_of_prev.strftime("%Y-%m-%d")
+        end_date = last_of_prev.strftime("%Y-%m-%d")
+        mmyyyy_label = first_of_prev.strftime("%m/%Y")
+        return start_date, end_date, mmyyyy_label
+
+    @classmethod
     def _get_inflight_lock(cls) -> asyncio.Lock:
         try:
             loop = asyncio.get_running_loop()

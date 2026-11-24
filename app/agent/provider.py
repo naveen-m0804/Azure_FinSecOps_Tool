@@ -2,10 +2,11 @@
 Universal Multi-Provider AI Inference Engine
 Supports plug-and-play LLM providers via .env configuration:
 1. Groq Cloud (Default): High-speed tool-calling inference
-2. OpenAI (ChatGPT): gpt-4o, gpt-4o-mini
-3. Google Gemini: gemini-1.5-pro, gemini-1.5-flash via official OpenAI-compatible endpoint
-4. Anthropic Claude: claude-3-5-sonnet, claude-3-5-haiku via native messages API
-5. Azure OpenAI: Enterprise Azure OpenAI Service
+2. NVIDIA Nemotron: nvidia/nemotron-3.5-super-vl-120b-a12b via NVIDIA NIM / OpenAI-compatible endpoint
+3. OpenAI (ChatGPT): gpt-4o, gpt-4o-mini
+4. Google Gemini: gemini-1.5-pro, gemini-1.5-flash via official OpenAI-compatible endpoint
+5. Anthropic Claude: claude-3-5-sonnet, claude-3-5-haiku via native messages API
+6. Azure OpenAI: Enterprise Azure OpenAI Service
 """
 import os
 import json
@@ -817,6 +818,155 @@ class AzureOpenAIInferenceProvider(BaseLLMProvider):
 
 
 # ==============================================================================
+# 6. NVIDIA Nemotron Inference Provider (NVIDIA NIM / Open Platform)
+# ==============================================================================
+class NemotronInferenceProvider(BaseLLMProvider):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        timeout: Optional[int] = None
+    ):
+        if api_key is not None:
+            self.api_key = api_key.strip()
+        else:
+            self.api_key = (settings.nemotron_api_key or os.getenv("NEMOTRON_API_KEY", os.getenv("NVIDIA_API_KEY", ""))).strip()
+        self.model = model or settings.nemotron_model or os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b").strip()
+        self.base_url = (base_url or settings.nemotron_base_url or os.getenv("NEMOTRON_BASE_URL", os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"))).rstrip("/")
+        self.timeout = timeout or settings.ai_request_timeout_seconds
+        self.max_tokens = settings.ai_max_tokens
+        self._fallback_models = [
+            "nvidia/nemotron-3.5-super-vl-120b-a12b",
+            "nvidia/nemotron-4-340b-instruct",
+            "meta/llama-3.3-70b-instruct"
+        ]
+
+    def is_configured(self) -> bool:
+        return bool(self.api_key and len(self.api_key) > 5)
+
+    def get_provider_name(self) -> str:
+        return "Nemotron (NVIDIA)"
+
+    def get_model_name(self) -> str:
+        return self.model
+
+    def get_config_guidance(self) -> str:
+        return (
+            "### ⚠️ Nemotron (NVIDIA) API Key Configuration Required\n\n"
+            f"The **FinSecOps Agentic AI** is configured to use the **Nemotron (NVIDIA)** provider (`{self.model}`).\n\n"
+            "**To configure your Nemotron / NVIDIA API key**:\n"
+            "1. Obtain an API key from [build.nvidia.com](https://build.nvidia.com/) (starts with `nvapi-`) or your enterprise NVIDIA NIM endpoint.\n"
+            "2. Open your `.env` file and set:\n"
+            "   ```bash\n"
+            "   AI_PROVIDER=nemotron\n"
+            "   NEMOTRON_API_KEY=nvapi-your-key-here\n"
+            f"   NEMOTRON_MODEL={self.model}\n"
+            f"   NEMOTRON_BASE_URL={self.base_url}\n"
+            "   ```\n"
+            "3. Ask your question or command again."
+        )
+
+    async def chat_completion(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        temperature: float = 0.1
+    ) -> Dict[str, Any]:
+        if not self.is_configured():
+            raise AIProviderError(
+                "Nemotron (NVIDIA) API key is missing. Set NEMOTRON_API_KEY or NVIDIA_API_KEY in .env."
+            )
+
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": self.max_tokens
+        }
+
+        if tools and len(tools) > 0:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+
+        models_to_try = [self.model] + [m for m in self._fallback_models if m != self.model]
+        last_error = None
+        max_retries = 3
+
+        for current_model in models_to_try:
+            payload["model"] = current_model
+            for attempt in range(1, max_retries + 1):
+                try:
+                    async with httpx.AsyncClient(timeout=self.timeout) as client:
+                        resp = await client.post(url, headers=headers, json=payload)
+
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            choices = data.get("choices", [])
+                            if not choices:
+                                raise AIProviderError("Nemotron API returned 200 OK but choices array is empty.")
+                            choice = choices[0]
+                            return {
+                                "message": choice.get("message", {}),
+                                "finish_reason": choice.get("finish_reason"),
+                                "usage": data.get("usage", {}),
+                                "model_used": current_model
+                            }
+
+                        if resp.status_code == 429:
+                            wait_sec = (2 ** attempt) + 1.0
+                            logger.warning(
+                                f"Nemotron rate limit (429) on attempt {attempt}. Retrying in {wait_sec:.1f}s..."
+                            )
+                            if attempt < max_retries:
+                                await asyncio.sleep(wait_sec)
+                                continue
+                            last_error = AIProviderError("Nemotron API rate limit exceeded (HTTP 429).")
+                            break
+
+                        if resp.status_code in [401, 403]:
+                            raise AIProviderError(
+                                f"Nemotron API authentication failed (HTTP {resp.status_code}). Please verify your NEMOTRON_API_KEY."
+                            )
+
+                        if resp.status_code in [404, 400] and "model" in resp.text.lower():
+                            logger.warning(
+                                f"Nemotron model '{current_model}' unavailable (HTTP {resp.status_code}): {resp.text[:150]}. Trying fallback..."
+                            )
+                            last_error = AIProviderError(f"Model {current_model} not available: {resp.text[:150]}")
+                            break
+
+                        if resp.status_code >= 500:
+                            if attempt < max_retries:
+                                await asyncio.sleep(2 * attempt)
+                                continue
+                            last_error = AIProviderError(f"Nemotron server error (HTTP {resp.status_code}).")
+                            break
+
+                        last_error = AIProviderError(
+                            f"Nemotron API returned HTTP {resp.status_code}: {resp.text[:250]}"
+                        )
+                        break
+
+                except (httpx.RequestError, httpx.TimeoutException) as ex:
+                    logger.warning(f"Network error communicating with Nemotron ({current_model}) on attempt {attempt}: {ex}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(2 * attempt)
+                    else:
+                        last_error = AIProviderError(f"Network error communicating with Nemotron: {str(ex)}")
+
+        raise last_error or AIProviderError("All Nemotron inference attempts failed.")
+
+
+# ==============================================================================
 # Provider Factory Function
 # ==============================================================================
 def get_ai_provider(provider_name: Optional[str] = None) -> BaseLLMProvider:
@@ -824,6 +974,7 @@ def get_ai_provider(provider_name: Optional[str] = None) -> BaseLLMProvider:
     Factory function returning the configured LLM provider instance.
     Supported provider names (case-insensitive):
     - 'groq' (default)
+    - 'nemotron', 'nvidia', 'nemotron-3.5', 'nvidia_nemotron'
     - 'openai', 'chatgpt'
     - 'gemini', 'google'
     - 'claude', 'anthropic'
@@ -831,7 +982,9 @@ def get_ai_provider(provider_name: Optional[str] = None) -> BaseLLMProvider:
     """
     prov = (provider_name or settings.ai_provider or os.getenv("AI_PROVIDER", "groq")).strip().lower()
 
-    if prov in ["openai", "chatgpt"]:
+    if prov in ["nemotron", "nvidia", "nemotron-3.5", "nvidia_nemotron"]:
+        return NemotronInferenceProvider()
+    elif prov in ["openai", "chatgpt"]:
         return OpenAIInferenceProvider()
     elif prov in ["gemini", "google"]:
         return GeminiInferenceProvider()

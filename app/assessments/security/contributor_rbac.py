@@ -58,11 +58,37 @@ class ContributorRbacAssessment(BaseAssessment):
             for a in assignments:
                 resources_evaluated += 1
                 props = a.get("properties", {})
-                role_def_id = (props.get("roleDefinitionId") or "").lower()
+                role_def_id = str(props.get("roleDefinitionId") or "").lower()
                 scope = props.get("scope") or f"/subscriptions/{sub.subscription_id}"
                 raw_principal_type = props.get("principalType") or "User"
                 principal_id = props.get("principalId") or a.get("name", "Unknown Principal")
                 pid_clean = str(principal_id).strip().lower()
+
+                # Scope Filter: Strictly filter to Subscription scope ("This resource") matching Azure Portal Subscription IAM
+                sub_clean = sub.subscription_id.lower().strip()
+                sub_scope_clean = f"/subscriptions/{sub_clean}"
+                scope_clean = str(scope).lower().strip().rstrip("/")
+                is_sub_scope = (
+                    scope_clean in (sub_scope_clean, f"subscriptions/{sub_clean}", sub_clean)
+                    or "/resourcegroups/" not in scope_clean
+                )
+                if not is_sub_scope:
+                    continue
+
+                # Check if this assignment is the built-in Contributor role (exclude Owner and non-Contributor roles)
+                exp_props = props.get("expandedProperties") or {}
+                role_def_name = str(exp_props.get("roleDefinitionName") or props.get("roleDefinitionName") or "").strip().lower()
+                is_contributor = (
+                    CONTRIBUTOR_ROLE_ID in role_def_id
+                    or role_def_id.endswith(CONTRIBUTOR_ROLE_ID)
+                    or role_def_name == "contributor"
+                )
+                is_owner = OWNER_ROLE_ID in role_def_id or "owner" in role_def_id or "owner" in role_def_name
+
+                if not is_contributor or is_owner:
+                    continue
+
+                role_name = "Contributor"
 
                 # Determine accurate real display name and username
                 resolved_info = resolved_map.get(pid_clean, {})
@@ -70,7 +96,6 @@ class ContributorRbacAssessment(BaseAssessment):
                 resolved_upn = resolved_info.get("user_principal_name")
                 resolved_type = resolved_info.get("type") or raw_principal_type
 
-                exp_props = props.get("expandedProperties") or {}
                 prop_dname = exp_props.get("displayName") or props.get("displayName")
                 prop_upn = (
                     exp_props.get("email")
@@ -83,99 +108,71 @@ class ContributorRbacAssessment(BaseAssessment):
                 final_dname = resolved_dname or prop_dname
                 final_upn = resolved_upn or prop_upn
 
-                if final_dname and final_upn and final_dname.lower() != final_upn.lower():
-                    real_principal_name = f"{final_dname} ({final_upn})"
-                elif final_dname:
+                # Clean display name matching Azure Portal IAM blade
+                if final_dname:
                     real_principal_name = final_dname
                 elif final_upn:
                     real_principal_name = final_upn
                 else:
-                    real_principal_name = f"Direct Identity ({resolved_type})"
+                    real_principal_name = f"Identity {principal_id[:8]}..."
 
-                principal_type = resolved_type
-
-                # Check if this assignment is Contributor or Owner
-                is_contributor = CONTRIBUTOR_ROLE_ID in role_def_id or "contributor" in role_def_id
-                is_owner = OWNER_ROLE_ID in role_def_id or "owner" in role_def_id
-
-                if not (is_contributor or is_owner):
-                    continue
-
-                role_name = "Owner" if is_owner else "Contributor"
-
-                # Classify assignment scope: Subscription vs Resource Group vs Resource
-                scope_lower = scope.lower().strip("/")
-                rg_name = "Subscription Scope"
-                res_name = "All Subscription Resources"
-                assignment_scope_type = "Subscription"
-
-                if "/resourcegroups/" in scope_lower:
-                    parts = scope_lower.split("/resourcegroups/")
-                    rg_part = parts[1].split("/")[0]
-                    rg_name = rg_part
-                    if "/providers/" in parts[1]:
-                        assignment_scope_type = "Resource"
-                        res_name = parts[1].split("/")[-1]
-                    else:
-                        assignment_scope_type = "Resource Group"
-                        res_name = f"All Resources in {rg_part}"
+                # Normalize principal type matching Azure Portal (Group, Service principal, User, Managed identity)
+                ptype_raw = (resolved_type or raw_principal_type or "").strip().lower()
+                if "group" in ptype_raw:
+                    norm_principal_type = "Group"
+                elif "serviceprincipal" in ptype_raw or "application" in ptype_raw or "spn" in ptype_raw:
+                    norm_principal_type = "Service principal"
+                elif "user" in ptype_raw or "guest" in ptype_raw:
+                    norm_principal_type = "User"
+                elif "identity" in ptype_raw:
+                    norm_principal_type = "Managed identity"
                 else:
-                    assignment_scope_type = "Subscription"
-                    rg_name = "Subscription Scope"
-                    res_name = f"All Resources in {sub.display_name}"
+                    norm_principal_type = resolved_type or "Identity"
 
-                # Security Review Criteria:
-                # Flag broad subscription-level Contributor/Owner assignments, especially to individual users or direct assignments
-                is_gap = False
-                if assignment_scope_type == "Subscription":
-                    # Subscription-wide Contributor/Owner assignment
-                    if principal_type.lower() in ("user", "guest") or is_owner:
-                        is_gap = True
-                elif assignment_scope_type == "Resource Group" and principal_type.lower() == "user":
-                    # Direct individual user assignment at resource group level (should use group RBAC)
-                    is_gap = True
+                # Security Review Criteria for broad Subscription Contributor permissions
+                if norm_principal_type == "Group":
+                    remediation = "Subscription-wide Contributor privileges granted to group. Review group membership regularly and enforce Azure AD PIM just-in-time role elevation."
+                elif norm_principal_type == "Service principal":
+                    remediation = "Service principal possesses broad Subscription Contributor permissions. Restrict permissions to least-privilege custom roles or scope down to target resource groups."
+                else:
+                    remediation = "Replace direct user assignment at subscription scope with Azure AD Security Group membership or Azure AD PIM just-in-time role activation."
 
-                if is_gap:
-                    remediation = (
-                        "Replace direct user assignment with Azure AD Security Group membership or migrate "
-                        "to Privileged Identity Management (PIM) for just-in-time elevation."
+                findings.append(
+                    FindingModel(
+                        finding_id=f"sec14-{sub.subscription_id[:8]}-{a.get('name', '')[:10]}",
+                        assessment_id=self.assessment_id,
+                        category=self.category,
+                        subscription_id=sub.subscription_id,
+                        subscription_name=sub.display_name,
+                        resource_group="Subscription Scope",
+                        resource_name=sub.display_name,
+                        resource_type="Microsoft.Authorization/roleAssignments",
+                        resource_id=a.get("id", f"{scope}/providers/Microsoft.Authorization/roleAssignments/{a.get('name')}"),
+                        region="global",
+                        severity="High",
+                        status="Review Required",
+                        current_configuration=f"Contributor role granted to {norm_principal_type} '{real_principal_name}' at Subscription scope",
+                        measured_value=f"{norm_principal_type} Contributor (This resource)",
+                        recommended_configuration="Replace broad Subscription Contributor role with scoped role assignment or PIM eligible elevation",
+                        recommendation=f"Broad 'Contributor' role is assigned to {norm_principal_type} '{real_principal_name}' at the Subscription scope ({sub.display_name}). {remediation}",
+                        metric_period="Current RBAC state",
+                        data_source="Microsoft.Authorization RoleAssignments API (2022-04-01)",
+                        evidence={
+                            "principal_name": real_principal_name,
+                            "principal_id": principal_id,
+                            "user_name": final_upn or final_dname or real_principal_name,
+                            "principal_type": norm_principal_type,
+                            "role_name": role_name,
+                            "scope": "This resource",
+                            "assignment_type": "Active Permanent",
+                            "security_control": "Review Contributor permissions",
+                            "potential_score_increase": "+3.5%",
+                            "remediation": remediation
+                        },
+                        security_score_impact=3.5,
+                        collected_at=now_str
                     )
-
-                    findings.append(
-                        FindingModel(
-                            finding_id=f"sec14-{sub.subscription_id[:8]}-{a.get('name', '')[:10]}",
-                            assessment_id=self.assessment_id,
-                            category=self.category,
-                            subscription_id=sub.subscription_id,
-                            subscription_name=sub.display_name,
-                            resource_group=rg_name,
-                            resource_name=res_name,
-                            resource_type="Microsoft.Authorization/roleAssignments",
-                            resource_id=a.get("id", f"{scope}/providers/Microsoft.Authorization/roleAssignments/{a.get('name')}"),
-                            region="global",
-                            severity="High" if assignment_scope_type == "Subscription" and is_owner else "Medium",
-                            status="Review Required",
-                            current_configuration=f"{role_name} granted to {real_principal_name} at {assignment_scope_type} scope",
-                            measured_value=f"Direct {principal_type} {role_name} Assignment",
-                            recommended_configuration="Enforce RBAC group assignments or Azure AD PIM just-in-time role activation",
-                            recommendation=f"Direct {principal_type} role assignment '{role_name}' granted to '{real_principal_name}' at {assignment_scope_type} scope requires review. {remediation}",
-                            metric_period="Current RBAC state",
-                            data_source="Microsoft.Authorization RoleAssignments API (2022-04-01)",
-                            evidence={
-                                "principal_name": real_principal_name,
-                                "user_name": final_upn or final_dname or real_principal_name,
-                                "principal_type": f"{principal_type} (Direct)",
-                                "role_name": role_name,
-                                "scope": "Subscription Scope" if assignment_scope_type == "Subscription" else (f"Resource Group ({rg_name})" if assignment_scope_type == "Resource Group" else f"Resource ({res_name})"),
-                                "assignment_type": "Direct Assignment",
-                                "security_control": "Review Contributor permissions",
-                                "potential_score_increase": "+3.5%",
-                                "remediation": remediation
-                            },
-                            security_score_impact=3.5,
-                            collected_at=now_str
-                        )
-                    )
+                )
 
         status = AssessmentStatus.COMPLETED if findings else AssessmentStatus.NO_FINDINGS
         total_score_impact = round(sum(f.security_score_impact for f in findings if f.security_score_impact), 1) if findings else None

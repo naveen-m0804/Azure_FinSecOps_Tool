@@ -41,14 +41,53 @@ class MonitorAdapter:
                     for ts in timeseries:
                         for pt in ts.get("data", []):
                             avg = pt.get("average")
+                            if avg is None:
+                                avg = pt.get("total") if pt.get("total") is not None else pt.get("maximum")
                             if avg is not None:
-                                values.append(avg)
-                    if values:
-                        result[m_name] = sum(values) / len(values)
-                    else:
-                        result[m_name] = 0.0
+                                values.append(float(avg))
+                    val = sum(values) / len(values) if values else 0.0
+                    if m_name:
+                        result[m_name] = val
+                        result[m_name.lower()] = val
+                        result[m_name.replace(" ", "").lower()] = val
                 return {"success": True, "metrics": result, "raw": data}
-            return {"success": False, "error": f"HTTP {resp.status_code}"}
+
+            # If multi-metric query failed with HTTP 400 (e.g. one metric is an invalid guest metric),
+            # split and query individual metrics so all supported platform metrics are successfully returned.
+            names_list = [m.strip() for m in metric_names.split(",") if m.strip()]
+            if resp.status_code == 400 and len(names_list) > 1:
+                combined_result: Dict[str, float] = {}
+                for single_m in names_list:
+                    sub_params = dict(params)
+                    sub_params["metricnames"] = single_m
+                    try:
+                        sub_resp = await client.execute_request("GET", url, params=sub_params)
+                        if sub_resp.status_code == 200:
+                            sub_data = sub_resp.json()
+                            for m in sub_data.get("value", []):
+                                m_name = m.get("name", {}).get("value")
+                                values = [
+                                    float(pt.get("average") if pt.get("average") is not None else (pt.get("total") or pt.get("maximum") or 0.0))
+                                    for ts in m.get("timeseries", [])
+                                    for pt in ts.get("data", [])
+                                    if pt.get("average") is not None or pt.get("total") is not None or pt.get("maximum") is not None
+                                ]
+                                val = sum(values) / len(values) if values else 0.0
+                                if m_name:
+                                    combined_result[m_name] = val
+                                    combined_result[m_name.lower()] = val
+                                    combined_result[m_name.replace(" ", "").lower()] = val
+                    except Exception:
+                        pass
+                if combined_result:
+                    return {"success": True, "metrics": combined_result}
+
+            err_detail = ""
+            try:
+                err_detail = resp.json().get("error", {}).get("message", "")
+            except Exception:
+                err_detail = resp.text[:150]
+            return {"success": False, "error": f"HTTP {resp.status_code}: {err_detail}" if err_detail else f"HTTP {resp.status_code}"}
         except Exception as ex:
             return {"success": False, "error": str(ex)}
 

@@ -54,9 +54,7 @@ def generate_combined_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_
 
     summary = job_data.get("summary", {})
     raw_sec_score = summary.get("current_security_score", summary.get("security_score"))
-    raw_achievable = summary.get("achievable_security_score")
     sec_score_str = f"{round(raw_sec_score)}%" if raw_sec_score is not None else "--"
-    achievable_str = f"{round(raw_achievable)}%" if raw_achievable is not None else "--"
     tot_monthly = summary.get("total_monthly_savings", 0.0)
     tot_annual = summary.get("total_annual_savings", 0.0)
     curr_sym = summary.get("currency", "$")
@@ -68,7 +66,6 @@ def generate_combined_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_
     exec_stats = [
         [
             Paragraph("<b>Current Security Score</b>", styles["TableHeader"]),
-            Paragraph("<b>Achievable Security Score</b>", styles["TableHeader"]),
             Paragraph("<b>Security Findings</b>", styles["TableHeader"]),
             Paragraph("<b>Identified Cost Leakage</b>", styles["TableHeader"]),
             Paragraph("<b>Monthly Savings</b>", styles["TableHeader"]),
@@ -76,15 +73,14 @@ def generate_combined_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_
         ],
         [
             Paragraph(f"<b>{sec_score_str}</b>", styles["TableCellBold"]),
-            Paragraph(f"<font color='#059669'><b>{achievable_str}</b></font>", styles["TableCellBold"]),
             Paragraph(str(sec_findings_count), styles["TableCellBold"]),
             Paragraph(f"<font color='#DE1A3B'><b>{curr_prefix}{tot_monthly:,.2f}</b></font>", styles["TableCellBold"]),
             Paragraph(f"<font color='#059669'><b>{curr_prefix}{tot_monthly:,.2f}</b></font>", styles["TableCellBold"]),
             Paragraph(f"<font color='#047857'><b>{curr_prefix}{tot_annual:,.2f}</b></font>", styles["TableCellBold"]),
         ]
     ]
-    col_w_exec = total_printable_width / 6
-    t_exec = Table(exec_stats, colWidths=[col_w_exec] * 6)
+    col_w_exec = total_printable_width / 5
+    t_exec = Table(exec_stats, colWidths=[col_w_exec] * 5)
     t_exec.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_DARK),
         ("BACKGROUND", (0, 1), (-1, 1), COLOR_LIGHT_BG),
@@ -182,11 +178,60 @@ def generate_combined_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_
         sec_block.append(Paragraph(f"<b>[{ass.code}] {escape_xml(report_title)}</b>", styles["SubSectionHeader"]))
         sec_block.append(Spacer(1, 2))
 
-        if findings:
+        # Check if SEC-01: Separate Overall Secure Score from individual controls
+        overall_findings = []
+        table_findings = findings
+        if ass.assessment_id in ("subscription_security_score", "secure_score"):
+            overall_findings = [
+                f for f in findings
+                if (getattr(f, "resource_name", "") == "Microsoft Defender Overall Secure Score"
+                    or getattr(f, "finding_id", "").endswith("-ascScore"))
+            ]
+            table_findings = [f for f in findings if f not in overall_findings]
+
+            if overall_findings:
+                for of in overall_findings:
+                    score_val = of.measured_value or (f"{of.evidence.get('percentage')}%" if of.evidence.get('percentage') is not None else "--")
+                    sub_name = of.subscription_name
+                    rec_txt = of.recommended_configuration or of.recommendation or "--"
+
+                    overall_data = [
+                        [
+                            Paragraph("<b>Subscription</b>", styles["TableHeaderSmall"]),
+                            Paragraph("<b>Microsoft Defender Overall Secure Score</b>", styles["TableHeaderSmall"]),
+                            Paragraph("<b>Posture Status</b>", styles["TableHeaderSmall"]),
+                            Paragraph("<b>Remediation Guidance</b>", styles["TableHeaderSmall"]),
+                        ],
+                        [
+                            Paragraph(f"<b>{escape_xml(sub_name)}</b>", styles["TableCellSmallBold"]),
+                            Paragraph(f"<font color='{COLOR_PRIMARY_PURPLE.hexval()}'><b>{escape_xml(score_val)}</b></font>", styles["TableCellSmallBold"]),
+                            Paragraph(f"<b>{escape_xml(of.status)}</b>", styles["TableCellSmallBold"]),
+                            Paragraph(escape_xml(rec_txt), styles["TableCellSmall"]),
+                        ]
+                    ]
+                    w_ov = [total_printable_width * 0.22, total_printable_width * 0.28, total_printable_width * 0.18, total_printable_width * 0.32]
+                    t_overall = Table(overall_data, colWidths=w_ov)
+                    t_overall.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, 0), COLOR_PRIMARY_PURPLE),
+                        ("BACKGROUND", (0, 1), (-1, 1), COLOR_LIGHT_BG),
+                        ("BOX", (0, 0), (-1, -1), 1.2, COLOR_PRIMARY_PURPLE),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.5, COLOR_BORDER),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ]))
+                    sec_block.append(t_overall)
+                    sec_block.append(Spacer(1, 4))
+
+                if table_findings:
+                    sec_block.append(Paragraph("<b>Security Controls Breakdown</b>", styles["TableCellBold"]))
+                    sec_block.append(Spacer(1, 2))
+
+        if table_findings:
             header_row = [Paragraph(f"<b>{escape_xml(col)}</b>", styles["TableHeaderSmall"]) for col in columns]
             table_data = [header_row]
 
-            for f in findings:
+            for f in table_findings:
                 row_vals = extract_security_finding_row(ass.assessment_id, f)
                 formatted_row = []
                 for val in row_vals:
@@ -211,7 +256,7 @@ def generate_combined_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_
                 if r_idx % 2 == 0:
                     t_module.setStyle(TableStyle([("BACKGROUND", (0, r_idx), (-1, r_idx), COLOR_LIGHT_BG)]))
             sec_block.append(t_module)
-        else:
+        elif not overall_findings:
             sec_block.append(Paragraph("<i>No security gaps identified. All evaluated resources satisfy baseline controls.</i>", styles["TableCellSmall"]))
 
         sec_block.append(Spacer(1, 8))

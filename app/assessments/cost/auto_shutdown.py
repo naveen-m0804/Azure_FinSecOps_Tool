@@ -35,15 +35,15 @@ class AutoShutdownAssessment(BaseAssessment):
         findings: List[FindingModel] = []
         errors: List[str] = []
         resources_evaluated = 0
-        mtd_start, mtd_end = get_current_month_to_date()
+        cost_start, cost_end, cost_month = CostManagementAdapter.get_last_completed_month_date_range()
 
         for sub in context.subscriptions:
             cost_map = await CostManagementAdapter.query_resource_costs(
                 context.client,
                 subscription_id=sub.subscription_id,
-                start_date=mtd_start,
-                end_date=mtd_end,
-                resource_type_filter="microsoft.compute/virtualmachines"
+                start_date=cost_start,
+                end_date=cost_end,
+                resource_type_filter=None  # Query all resource types to aggregate VM + Disks + NICs + IPs
             )
 
             try:
@@ -127,18 +127,40 @@ class AutoShutdownAssessment(BaseAssessment):
                 if auto_shutdown_status != "Enabled":
                     vm_size = props.get("hardwareProfile", {}).get("vmSize", "Standard_D2s_v5")
                     rates = PricingEngine.get_vm_rates(vm_size)
-                    hourly_rate = rates.get("hourly", 0.096)
 
-                    # Financially defensible savings calculation:
-                    # 12 off-hours shutdown per business day = 260 hours/month * hourly compute rate
-                    # Prohibit multiplying partial MTD * 12!
-                    monthly_compute_savings = round(260 * hourly_rate, 2)
-                    annual_savings = round(monthly_compute_savings * 12, 2)
+                    # AGGREGATE FULL COST OF VM AND ALL ATTACHED ASSETS (Disks, NICs, IPs)
+                    storage_prof = props.get("storageProfile", {})
+                    os_disk_id = storage_prof.get("osDisk", {}).get("managedDisk", {}).get("id")
+                    os_disk_cost = cost_map.get(normalize_resource_id(os_disk_id), {}).get("cost", 0.0) if os_disk_id else 0.0
+
+                    data_disks_cost = 0.0
+                    for dd in storage_prof.get("dataDisks", []):
+                        dd_id = dd.get("managedDisk", {}).get("id")
+                        if dd_id:
+                            data_disks_cost += cost_map.get(normalize_resource_id(dd_id), {}).get("cost", 0.0)
+
+                    network_prof = props.get("networkProfile", {})
+                    nics_cost = 0.0
+                    for nic in network_prof.get("networkInterfaces", []):
+                        nic_id = nic.get("id")
+                        if nic_id:
+                            nics_cost += cost_map.get(normalize_resource_id(nic_id), {}).get("cost", 0.0)
+
+                    vm_compute_cost = cost_map.get(norm_vm_id, {}).get("cost", 0.0)
+                    total_vm_cost = vm_compute_cost + os_disk_cost + data_disks_cost + nics_cost
+
+                    # Fallback if no billing data exists yet
+                    if total_vm_cost <= 0.0:
+                        total_vm_cost = rates.get("monthly", 70.08)
+
+                    # User formula: hourly rate = (last month cost / 710 hours)
+                    # Savings = hourly rate * off_hours (~360 off-hours per month)
+                    hourly_rate = total_vm_cost / 710.0
+                    monthly_compute_savings = round(hourly_rate * 360.0, 2)
+                    annual_savings = round(monthly_compute_savings * 12.0, 2)
 
                     cost_item = cost_map.get(norm_vm_id, {})
-                    cost_val = cost_item.get("cost", rates.get("monthly", 70.08))
                     currency = cost_item.get("currency", context.currency)
-
                     parsed = parse_azure_resource_id(vm_id)
 
                     findings.append(
@@ -158,9 +180,9 @@ class AutoShutdownAssessment(BaseAssessment):
                             current_configuration=f"Environment: {env_val} | Auto-Shutdown: {auto_shutdown_status} | Size: {vm_size} | Power: {power_state}",
                             measured_value=f"VM runs without active auto-shutdown schedule (State: {power_state})",
                             recommended_configuration="Enable automated daily auto-shutdown at 19:00 local time",
-                            recommendation=f"Non-production VM '{vm_name}' does not have an active auto-shutdown schedule.",
-                            metric_period=f"{mtd_start} to {mtd_end} (MTD)",
-                            data_source="Microsoft.DevTestLab/schedules API",
+                            recommendation=f"Non-production VM '{vm_name}' does not have an active auto-shutdown schedule. Total VM + assets monthly cost: ${total_vm_cost:,.2f}.",
+                            metric_period=f"Last Completed Month ({cost_month})",
+                            data_source="Microsoft.DevTestLab/schedules API & Azure Cost Management",
                             evidence={
                                 "environment": env_val,
                                 "vm_size": vm_size,
@@ -171,16 +193,22 @@ class AutoShutdownAssessment(BaseAssessment):
                                 "scheduled_shutdown_time": scheduled_time_display,
                                 "shutdown_time": sch_time,
                                 "timezone": sch_tz,
-                                "hourly_compute_rate": hourly_rate,
-                                "actual_cost_mtd": round(cost_val, 2)
+                                "vm_compute_cost": round(vm_compute_cost, 2),
+                                "os_disk_cost": round(os_disk_cost, 2),
+                                "data_disks_cost": round(data_disks_cost, 2),
+                                "network_cost": round(nics_cost, 2),
+                                "total_vm_cost": round(total_vm_cost, 2),
+                                "hourly_rate": round(hourly_rate, 4),
+                                "actual_cost_mtd": round(total_vm_cost, 2),
+                                "cost_month": cost_month
                             },
-                            current_monthly_cost=round(cost_val, 2),
+                            current_monthly_cost=round(total_vm_cost, 2),
                             estimated_monthly_savings=monthly_compute_savings,
                             estimated_annual_savings=annual_savings,
                             currency=currency,
                             savings_type="Estimated Savings",
                             confidence="High",
-                            calculation_method="12 off-hours shutdown per weekday (260 hrs/mo) multiplied by hourly compute rate",
+                            calculation_method=f"Total VM + attached assets cost (${total_vm_cost:,.2f}) / 710 hours * 360 off-hours",
                             validation_required="Confirm developers do not require off-hours or overnight compute runtime",
                             collected_at=now_str
                         )

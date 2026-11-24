@@ -8,7 +8,7 @@ from app.azure.resources import ResourcesAdapter
 
 class FunctionAppsAssessment(BaseAssessment):
     assessment_id = "function_apps"
-    code = "COST-17"
+    code = "COST-16"
     category = "cost"
     name = "Function App Execution Time / Frequency"
     description = "Audit Function Apps hosted on dedicated App Service Plans that have low execution counts and can transition to serverless Consumption."

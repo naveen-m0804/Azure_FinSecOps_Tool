@@ -20,7 +20,7 @@ from app.assessments.security import (
     ContributorRbacAssessment,
 )
 
-# Cost Assessments (19 modules)
+# Cost Assessments (18 modules)
 from app.assessments.cost import (
     UnderutilizedVmsAssessment,
     OrphanResourcesAssessment,
@@ -35,7 +35,6 @@ from app.assessments.cost import (
     NewUnusedResourcesAssessment,
     StorageLifecycleAssessment,
     DatabaseAllocatedUsageAssessment,
-    DatabaseSkuAssessment,
     BackupStatusAssessment,
     OldSnapshotsAssessment,
     FunctionAppsAssessment,
@@ -70,7 +69,7 @@ class AssessmentRegistry:
             instance = cls()
             self._assessments[instance.assessment_id] = instance
 
-        # 19 Cost
+        # 18 Cost
         cost_classes = [
             UnderutilizedVmsAssessment,
             OrphanResourcesAssessment,
@@ -85,7 +84,6 @@ class AssessmentRegistry:
             NewUnusedResourcesAssessment,
             StorageLifecycleAssessment,
             DatabaseAllocatedUsageAssessment,
-            DatabaseSkuAssessment,
             BackupStatusAssessment,
             OldSnapshotsAssessment,
             FunctionAppsAssessment,

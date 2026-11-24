@@ -27,6 +27,19 @@ class DiskEncryptionAssessment(BaseAssessment):
         resources_evaluated = 0
 
         for sub in context.subscriptions:
+            # Query VMs in subscription to dynamically evaluate Encryption at Host status
+            vm_host_encryption_map: Dict[str, bool] = {}
+            try:
+                vms = await ComputeAdapter.get_vms(context.client, sub.subscription_id)
+                for vm in vms:
+                    vm_id_clean = str(vm.get("id", "")).strip().lower()
+                    sec_prof = vm.get("properties", {}).get("securityProfile", {}) or {}
+                    enc_at_host = bool(sec_prof.get("encryptionAtHost", False))
+                    if vm_id_clean:
+                        vm_host_encryption_map[vm_id_clean] = enc_at_host
+            except Exception:
+                pass
+
             # Query disks in subscription
             disks = await ComputeAdapter.get_disks(context.client, sub.subscription_id)
             for d in disks:
@@ -47,6 +60,7 @@ class DiskEncryptionAssessment(BaseAssessment):
                 # Attached VM
                 managed_by = d.get("managedBy", "")
                 attached_vm = managed_by.split("/")[-1] if managed_by else "Unattached"
+                managed_by_clean = str(managed_by).strip().lower()
 
                 # Encryption properties
                 encryption = props.get("encryption", {})
@@ -60,8 +74,8 @@ class DiskEncryptionAssessment(BaseAssessment):
                 ade_collection = props.get("encryptionSettingsCollection", {})
                 ade_enabled = bool(ade_collection and ade_collection.get("enabled"))
                 
-                # Check Encryption at Host (if VM attached, typically inherited from VM securityProfile)
-                encryption_at_host = False
+                # Check Encryption at Host dynamically from attached VM
+                encryption_at_host = vm_host_encryption_map.get(managed_by_clean, False)
 
                 # Only report security gaps:
                 # Disks lacking Customer-Managed Keys (CMK) and lacking Encryption-at-Host / ADE

@@ -56,9 +56,23 @@ class SubscriptionSecurityScoreAssessment(BaseAssessment):
                     score_info = props.get("score", {})
                     c_current = float(score_info.get("current", 0.0))
                     c_maximum = float(score_info.get("max", 0.0))
-                    c_pct = round((c_current / c_maximum * 100.0), 1) if c_maximum > 0 else 0.0
                     unhealthy_count = int(props.get("unhealthyResourceCount", 0))
                     healthy_count = int(props.get("healthyResourceCount", 0))
+
+                    # Accurate control score percentage calculation
+                    score_pct_raw = score_info.get("percentage") if "percentage" in score_info else props.get("percentage")
+                    if score_pct_raw is not None:
+                        try:
+                            val = float(score_pct_raw)
+                            c_pct = round(val * 100.0, 1) if (0.0 <= val <= 1.0 and val > 0) else round(val, 1)
+                        except (ValueError, TypeError):
+                            c_pct = round((c_current / c_maximum * 100.0), 1) if c_maximum > 0 else 0.0
+                    elif c_maximum > 0:
+                        c_pct = round((c_current / c_maximum * 100.0), 1)
+                    elif (healthy_count + unhealthy_count) > 0:
+                        c_pct = round((healthy_count / (healthy_count + unhealthy_count) * 100.0), 1)
+                    else:
+                        c_pct = 0.0
 
                     # Points that can be gained by remediating unhealthy resources under this control
                     points_to_gain = max(0.0, c_maximum - c_current)

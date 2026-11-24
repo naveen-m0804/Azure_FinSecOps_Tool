@@ -30,14 +30,14 @@ class UnderutilizedVmsAssessment(BaseAssessment):
         errors: List[str] = []
         resources_evaluated = 0
         start_iso, end_iso = get_observation_window(days=90)
-        mtd_start, mtd_end = get_current_month_to_date()
+        cost_start, cost_end, cost_month = CostManagementAdapter.get_last_completed_month_date_range()
 
         for sub in context.subscriptions:
             cost_map = await CostManagementAdapter.query_resource_costs(
                 context.client,
                 subscription_id=sub.subscription_id,
-                start_date=mtd_start,
-                end_date=mtd_end,
+                start_date=cost_start,
+                end_date=cost_end,
                 resource_type_filter="Microsoft.Compute/virtualMachines"
             )
 
@@ -116,7 +116,8 @@ class UnderutilizedVmsAssessment(BaseAssessment):
                             evidence={
                                 "average_cpu_percent": round(avg_cpu, 2),
                                 "vm_size": vm_size,
-                                "actual_cost_mtd": round(curr_cost, 2)
+                                "actual_cost_mtd": round(curr_cost, 2),
+                                "cost_month": cost_month
                             },
                             current_monthly_cost=round(curr_cost, 2),
                             estimated_monthly_savings=est_saving,

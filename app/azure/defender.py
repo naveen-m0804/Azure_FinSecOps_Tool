@@ -2,6 +2,70 @@ from typing import Dict, Any, List, Optional
 from app.azure.client_base import AzureClientBase
 
 class DefenderAdapter:
+    _metadata_cache: Dict[str, Dict[str, Any]] = {}
+
+    @classmethod
+    async def get_assessment_metadata(cls, client: AzureClientBase) -> Dict[str, Dict[str, Any]]:
+        """
+        Retrieves and caches official Microsoft Defender assessment metadata definitions.
+        Maps assessment metadata names (GUIDs) and display names to their metadata properties.
+        """
+        if cls._metadata_cache:
+            return cls._metadata_cache
+        url: Optional[str] = "https://management.azure.com/providers/Microsoft.Security/assessmentMetadata?api-version=2021-06-01"
+        try:
+            while url:
+                resp = await client.execute_request("GET", url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data.get("value", []):
+                        m_name = (item.get("name") or "").lower()
+                        m_props = item.get("properties", {}) or {}
+                        if m_name:
+                            cls._metadata_cache[m_name] = m_props
+                        disp = (m_props.get("displayName") or "").strip().lower()
+                        if disp:
+                            cls._metadata_cache[disp] = m_props
+                    url = data.get("nextLink")
+                else:
+                    break
+        except Exception:
+            pass
+        return cls._metadata_cache
+
+    @staticmethod
+    async def get_high_priority_assessments_via_arg(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves High severity Defender recommendations directly via Azure Resource Graph.
+        Matches official Azure Portal Defender for Cloud recommendations query filtered to High severity.
+        """
+        try:
+            arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+            arg_payload = {
+                "subscriptions": [subscription_id],
+                "query": (
+                    f"securityresources "
+                    f"| where subscriptionId =~ '{subscription_id}' "
+                    f"| where type =~ 'microsoft.security/assessments' "
+                    f"| extend statusCode = tostring(properties.status.code) "
+                    f"| where statusCode in~ ('Unhealthy', 'Open', 'ActionRequired', 'Active') "
+                    f"| extend severity = coalesce(tostring(properties.metadata.severity), tostring(properties.status.severity), tostring(properties.severity)) "
+                    f"| where severity =~ 'High' "
+                    f"| project id, name, type, subscriptionId, resourceGroup, properties"
+                ),
+                "options": {
+                    "resultFormat": "objectArray"
+                }
+            }
+            resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+        return []
+
     @staticmethod
     async def get_secure_score(client: AzureClientBase, subscription_id: str) -> Dict[str, Any]:
         """
@@ -70,7 +134,7 @@ class DefenderAdapter:
         return {"success": True, "status_code": last_status, "value": all_items}
 
     @staticmethod
-    async def get_security_assessments(client: AzureClientBase, subscription_id: str, max_items: int = 50) -> Dict[str, Any]:
+    async def get_security_assessments(client: AzureClientBase, subscription_id: str, max_items: int = 300) -> Dict[str, Any]:
         """
         Retrieves security recommendations / assessments from Defender for Cloud with controlled pagination.
         Uses $expand=metadata to retrieve official Azure remediation guidance and descriptions.
@@ -261,14 +325,46 @@ class DefenderAdapter:
                     f"| where subscriptionId =~ '{subscription_id}' "
                     f"| where type =~ 'microsoft.security/attackpaths' "
                     f"| project id, name, type, properties"
-                )
+                ),
+                "options": {
+                    "resultFormat": "objectArray"
+                }
             }
             arg_resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
             if arg_resp.status_code == 200:
                 arg_data = arg_resp.json().get("data", [])
-                if arg_data:
+                if isinstance(arg_data, list) and arg_data:
                     return {"success": True, "status_code": 200, "value": arg_data}
         except Exception:
             pass
 
         return {"success": False, "status_code": 404, "value": [], "error": "Attack paths endpoint returned 404/400"}
+
+    @staticmethod
+    async def get_sub_assessments_via_arg(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves all sub-assessments (vulnerability findings, patch statuses, container vulnerabilities)
+        across a subscription directly via Azure Resource Graph.
+        """
+        try:
+            arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+            arg_payload = {
+                "subscriptions": [subscription_id],
+                "query": (
+                    f"securityresources "
+                    f"| where subscriptionId =~ '{subscription_id}' "
+                    f"| where type =~ 'microsoft.security/assessments/subassessments' "
+                    f"| project id, name, type, properties"
+                ),
+                "options": {
+                    "resultFormat": "objectArray"
+                }
+            }
+            resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+        return []

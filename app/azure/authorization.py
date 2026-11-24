@@ -1,7 +1,10 @@
 from typing import Dict, Any, List, Optional, Set
 import httpx
+import logging
 from app.azure.client_base import AzureClientBase
 from app.core.authentication import AzureAuthService
+
+logger = logging.getLogger("azure_finsecops.azure.authorization")
 
 # Known Microsoft 1st-party service principals and common system identities
 WELL_KNOWN_PRINCIPALS = {
@@ -20,7 +23,7 @@ class AuthorizationAdapter:
     async def get_role_assignments(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
         """
         Retrieves all role assignments in the subscription with pagination.
-        Enriches assignments with principal details using ARM $expand=principal with $filter=atScope().
+        Enriches assignments with principal details using ARM $expand=principal.
         """
         all_assignments: List[Dict[str, Any]] = []
         principal_info_map: Dict[str, Dict[str, str]] = {}
@@ -40,18 +43,28 @@ class AuthorizationAdapter:
                     if p_id:
                         exp = props.get("expandedProperties") or {}
                         dname = exp.get("displayName") or props.get("displayName") or ""
-                        upn = exp.get("email") or exp.get("principalName") or props.get("principalName") or props.get("userPrincipalName") or ""
+                        upn = (
+                            exp.get("email")
+                            or exp.get("principalName")
+                            or exp.get("userPrincipalName")
+                            or props.get("principalName")
+                            or props.get("userPrincipalName")
+                            or ""
+                        )
                         ptype = exp.get("principalType") or props.get("principalType") or ""
                         principal_info_map[p_id] = {
                             "display_name": dname,
                             "user_principal_name": upn,
                             "type": ptype
                         }
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug("atScope $expand=principal failed: %s", ex)
 
-        # 2. Query all role assignments across subscription and child scopes
-        url: Optional[str] = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
+        # 2. Query all role assignments across subscription and child scopes with $expand=principal
+        url: Optional[str] = (
+            f"https://management.azure.com/subscriptions/{subscription_id}"
+            f"/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$expand=principal"
+        )
 
         while url:
             try:
@@ -62,14 +75,61 @@ class AuthorizationAdapter:
                     all_assignments.extend(page_items)
                     url = data.get("nextLink")
                 else:
+                    # Fallback without $expand=principal if rejected or errored
+                    fallback_url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
+                    resp_fb = await client.execute_request("GET", fallback_url)
+                    if resp_fb.status_code == 200:
+                        all_assignments.extend(resp_fb.json().get("value", []))
                     break
             except Exception:
                 break
+
+        # Fallback to Azure Resource Graph if no assignments were retrieved via ARM
+        if not all_assignments:
+            try:
+                arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+                arg_payload = {
+                    "subscriptions": [subscription_id],
+                    "query": (
+                        f"authorizationresources "
+                        f"| where subscriptionId =~ '{subscription_id}' "
+                        f"| where type =~ 'microsoft.authorization/roleassignments' "
+                        f"| project id, name, type, properties"
+                    ),
+                    "options": {"resultFormat": "objectArray"}
+                }
+                arg_resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
+                if arg_resp.status_code == 200:
+                    arg_data = arg_resp.json().get("data", [])
+                    if isinstance(arg_data, list):
+                        all_assignments.extend(arg_data)
+            except Exception as ex:
+                logger.debug("ARG authorizationresources query failed: %s", ex)
 
         # 3. Enrich all assignments with cached expanded principal information
         for item in all_assignments:
             props = item.get("properties", {})
             p_id = (props.get("principalId") or "").strip().lower()
+            exp = props.get("expandedProperties") or {}
+
+            # Cache any names discovered directly in page items
+            dname = exp.get("displayName") or props.get("displayName") or ""
+            upn = (
+                exp.get("email")
+                or exp.get("principalName")
+                or exp.get("userPrincipalName")
+                or props.get("principalName")
+                or props.get("userPrincipalName")
+                or ""
+            )
+            if p_id and (dname or upn):
+                if p_id not in principal_info_map or not principal_info_map[p_id].get("display_name"):
+                    principal_info_map[p_id] = {
+                        "display_name": dname,
+                        "user_principal_name": upn,
+                        "type": exp.get("principalType") or props.get("principalType") or "User"
+                    }
+
             if p_id and p_id in principal_info_map:
                 cached = principal_info_map[p_id]
                 if not props.get("expandedProperties"):
@@ -96,9 +156,9 @@ class AuthorizationAdapter:
         Resolves object IDs to actual User Display Names, UserPrincipalNames, or Service Principal Names.
         Strategy:
         1. Match against well-known Azure identities & current client_id.
-        2. Query Microsoft Graph getByIds (if tenant_id, client_id, and client_secret are provided).
-        3. Query Microsoft Graph individual user/sp endpoints for remaining IDs.
-        4. Query ARM getDirectoryObjectsByKeys on management.azure.com.
+        2. Query ARM native getDirectoryObjectsByKeys on management.azure.com (requires NO Graph permissions).
+        3. Query Microsoft Graph getByIds (if tenant_id, client_id, and client_secret are provided).
+        4. Query Microsoft Graph individual user/sp endpoints for remaining IDs.
         """
         resolved: Dict[str, Dict[str, str]] = {}
         unresolved: Set[str] = set()
@@ -125,7 +185,34 @@ class AuthorizationAdapter:
         if not unresolved:
             return resolved
 
-        # 1. Attempt Microsoft Graph API Directory Object Lookup
+        # 1. Attempt ARM native getDirectoryObjectsByKeys (runs under standard Azure Subscription Reader permissions)
+        try:
+            arm_dir_url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.Authorization/getDirectoryObjectsByKeys?api-version=2022-04-01"
+            unresolved_list = list(unresolved)
+            chunks = [unresolved_list[i:i + 100] for i in range(0, len(unresolved_list), 100)]
+            for chunk in chunks:
+                arm_resp = await client.execute_request("POST", arm_dir_url, json_data={"ids": chunk})
+                if arm_resp.status_code == 200:
+                    objs = arm_resp.json().get("value", [])
+                    for obj in objs:
+                        oid = (obj.get("objectId") or obj.get("id") or "").lower()
+                        dname = obj.get("displayName") or ""
+                        upn = obj.get("userPrincipalName") or obj.get("principalName") or obj.get("signInName") or obj.get("email") or ""
+                        otype = obj.get("objectType") or obj.get("principalType") or "User"
+                        if oid and (dname or upn):
+                            resolved[oid] = {
+                                "display_name": dname,
+                                "user_principal_name": upn,
+                                "type": otype
+                            }
+                            unresolved.discard(oid)
+        except Exception as ex:
+            logger.debug("ARM getDirectoryObjectsByKeys failed: %s", ex)
+
+        if not unresolved:
+            return resolved
+
+        # 2. Attempt Microsoft Graph API Directory Object Lookup
         graph_token = None
         if tenant_id and client_id and client_secret:
             try:
@@ -156,7 +243,7 @@ class AuthorizationAdapter:
             except Exception:
                 pass
 
-        # 2. If getByIds failed or some IDs remain, try individual user lookup via Graph
+        # 3. If getByIds failed or some IDs remain, try individual user lookup via Graph
         if unresolved and graph_token:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as http_c:
@@ -200,51 +287,4 @@ class AuthorizationAdapter:
             except Exception:
                 pass
 
-        # 3. Attempt Azure ARM getDirectoryObjectsByKeys
-        if unresolved:
-            try:
-                arm_chunks = [list(unresolved)[i:i + 1000] for i in range(0, len(unresolved), 1000)]
-                for chunk in arm_chunks:
-                    arm_url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.Authorization/getDirectoryObjectsByKeys?api-version=2018-07-01-preview"
-                    resp = await client.execute_request("POST", arm_url, json_data={"keys": chunk, "types": ["User", "Group", "ServicePrincipal"]})
-                    if resp.status_code == 200:
-                        arm_objs = resp.json().get("value", [])
-                        for obj in arm_objs:
-                            oid = (obj.get("objectId") or obj.get("id") or "").lower()
-                            dname = obj.get("displayName") or ""
-                            upn = obj.get("userPrincipalName") or obj.get("mail") or obj.get("signInNames", [{}])[0].get("value", "")
-                            otype = obj.get("objectType") or "User"
-                            if oid:
-                                resolved[oid] = {
-                                    "display_name": dname,
-                                    "user_principal_name": upn,
-                                    "type": otype
-                                }
-                                unresolved.discard(oid)
-            except Exception:
-                pass
-
         return resolved
-
-    @staticmethod
-    async def get_role_definitions(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
-        """
-        Retrieves role definitions with pagination.
-        URI: /subscriptions/{sub}/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01
-        """
-        url: Optional[str] = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01"
-        all_definitions: List[Dict[str, Any]] = []
-
-        while url:
-            try:
-                resp = await client.execute_request("GET", url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    all_definitions.extend(data.get("value", []))
-                    url = data.get("nextLink")
-                else:
-                    break
-            except Exception:
-                break
-
-        return all_definitions
