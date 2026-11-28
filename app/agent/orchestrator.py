@@ -1,7 +1,7 @@
 """
 FinSecOps Agent Orchestrator
 Central intelligence coordinator managing intent classification, scope enforcement,
-conversation memory, Groq multi-step tool execution, and rich response presentation.
+conversation memory, Vertex AI multi-step tool execution, and rich response presentation.
 """
 import os
 import re
@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Optional
 
 from app.core.config import settings
 from app.agent.guardrails import FinSecOpsGuardrails, SecurityPolicyViolationError
-from app.agent.provider import get_ai_provider, BaseLLMProvider, AIProviderError, GroqProviderError
+from app.agent.provider import get_ai_provider, BaseLLMProvider, AIProviderError
 from app.agent.tools.registry import tool_registry, ToolExecutionContext
 
 logger = logging.getLogger("azure_finsecops.agent.orchestrator")
@@ -210,7 +210,7 @@ class FinSecOpsAgentOrchestrator:
         1. Scope & Policy check.
         2. Intent classification.
         3. Context preparation & Tool schema injection.
-        4. Multi-step tool execution loop with Groq.
+        4. Multi-step tool execution loop with Vertex AI.
         5. Response validation, step recording, and presentation formatting.
         """
         clean_query = (user_message or "").strip()
@@ -317,10 +317,10 @@ class FinSecOpsAgentOrchestrator:
                     tools=tool_schemas,
                     tool_choice="auto"
                 )
-            except (AIProviderError, GroqProviderError) as gpe:
-                logger.error(f"{provider.get_provider_name()} error on iteration {iteration}: {gpe}")
+            except AIProviderError as aie:
+                logger.error(f"{provider.get_provider_name()} error on iteration {iteration}: {aie}")
                 return {
-                    "reply": f"### ⚠️ AI Inference Error ({provider.get_provider_name()})\n\n{str(gpe)}",
+                    "reply": f"### ⚠️ AI Inference Error ({provider.get_provider_name()})\n\n{str(aie)}",
                     "intent": intent,
                     "steps": execution_steps,
                     "sources": list(sources_used),

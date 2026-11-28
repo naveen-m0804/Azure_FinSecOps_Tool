@@ -8,9 +8,10 @@ from app.schemas.finding import FindingModel
 from app.azure.compute import ComputeAdapter
 from app.azure.network import NetworkAdapter
 from app.azure.resources import ResourcesAdapter
+from app.azure.cost_management import CostManagementAdapter
 from app.azure.pricing import PricingEngine
-from app.utils.resource_ids import parse_azure_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
+from app.utils.environment import resolve_environment, matches_target_tags
 
 class OrphanResourcesAssessment(BaseAssessment):
     assessment_id = "orphan_resources"
@@ -62,17 +63,23 @@ class OrphanResourcesAssessment(BaseAssessment):
                 try:
                     disks = await ComputeAdapter.get_disks(context.client, sub.subscription_id)
                     for d in disks:
+                        if not matches_target_tags(d.get("tags"), context.target_tags):
+                            continue
                         sub_eval_count += 1
                         managed_by = d.get("managedBy")
                         if not managed_by:
                             d_name = d.get("name", "")
                             d_id = d.get("id", "")
-                            sku = d.get("sku", {}).get("name", "Standard_LRS")
-                            size_gb = d.get("properties", {}).get("diskSizeGB", 128)
-                            pricing_price = PricingEngine.get_disk_monthly_price(sku, size_gb)
+                            d_region = d.get("location", "")
+                            sku = d.get("sku", {}).get("name", "")
+                            size_gb = d.get("properties", {}).get("diskSizeGB")
                             norm_id = normalize_resource_id(d_id)
-                            cost_val = cost_map.get(norm_id, {}).get("cost")
-                            monthly_price = cost_val if cost_val is not None and cost_val > 0 else pricing_price
+                            cost_item = cost_map.get(norm_id, {})
+                            cost_val = cost_item.get("cost")
+                            currency = cost_item.get("currency", context.currency)
+                            monthly_price = float(cost_val) if (cost_val is not None and cost_val > 0) else None
+                            if monthly_price is None and sku and size_gb:
+                                monthly_price = await PricingEngine.get_disk_monthly_price(sku, int(size_gb), d_region, currency)
                             parsed = parse_azure_resource_id(d_id)
                             rg_name = parsed.get("resource_group") or "Unknown"
                             tags = d.get("tags") or {}
@@ -89,10 +96,10 @@ class OrphanResourcesAssessment(BaseAssessment):
                                     resource_name=d_name,
                                     resource_type="Microsoft.Compute/disks",
                                     resource_id=d_id,
-                                    region=d.get("location", "global"),
+                                    region=d_region or "global",
                                     severity="Medium",
                                     status="Unattached Managed Disk",
-                                    current_configuration=f"SKU: {sku} | Size: {size_gb} GB",
+                                    current_configuration=f"SKU: {sku or 'Unknown'} | Size: {size_gb or '--'} GB",
                                     measured_value="ManagedBy property is null",
                                     recommended_configuration="Verify backup requirement and delete unattached disk",
                                     recommendation=f"Managed disk '{d_name}' is unattached to any VM and continues to incur storage charges.",
@@ -102,19 +109,20 @@ class OrphanResourcesAssessment(BaseAssessment):
                                         "managed_by": None,
                                         "sku": sku,
                                         "size_gb": size_gb,
-                                        "actual_cost_mtd": round(monthly_price, 2),
+                                        "actual_cost_mtd": round(monthly_price, 2) if monthly_price is not None else None,
+                                        "savings_pct": 100.0 if (monthly_price is not None and monthly_price > 0) else None,
                                         "cost_month": cost_month,
                                         "environment": env_val,
                                         "orphan_reason": "Disk is not attached to any virtual machine"
                                     },
-                                    current_monthly_cost=round(monthly_price, 2),
-                                    estimated_monthly_savings=round(monthly_price, 2),
-                                    estimated_annual_savings=round(monthly_price * 12, 2),
-                                    currency=context.currency,
-                                    savings_type="Actual Cost",
-                                    confidence="High",
-                                    calculation_method="100% avoidable monthly disk storage fee",
-                                    validation_required="Confirm data retention compliance before deleting",
+                                    current_monthly_cost=round(monthly_price, 2) if monthly_price is not None else None,
+                                    estimated_monthly_savings=round(monthly_price, 2) if monthly_price is not None else None,
+                                    estimated_annual_savings=round(monthly_price * 12, 2) if monthly_price is not None else None,
+                                    currency=currency,
+                                    savings_type="Actual Cost" if (cost_val is not None and cost_val > 0) else ("Estimated Savings" if monthly_price is not None else "Not Estimated"),
+                                    confidence="High" if monthly_price is not None else "Low",
+                                    calculation_method="Monthly savings = eligible current monthly cost (100% if fully removed and charges cease); annual = monthly * 12",
+                                    validation_required="Confirm orphan + deletion approval; do not count resources merely detached temporarily or retained for recovery.",
                                     collected_at=now_str
                                 )
                             )
@@ -125,14 +133,21 @@ class OrphanResourcesAssessment(BaseAssessment):
                 try:
                     public_ips = await NetworkAdapter.get_public_ips(context.client, sub.subscription_id)
                     for pip in public_ips:
+                        if not matches_target_tags(pip.get("tags"), context.target_tags):
+                            continue
                         sub_eval_count += 1
                         props = pip.get("properties", {})
                         ip_config = props.get("ipConfiguration")
                         if not ip_config:
                             pip_name = pip.get("name", "")
                             pip_id = pip.get("id", "")
+                            pip_region = pip.get("location", "")
                             sku_name = pip.get("sku", {}).get("name", "Standard")
-                            monthly_price = PricingEngine.get_public_ip_monthly_price(sku_name)
+                            norm_pip_id = normalize_resource_id(pip_id)
+                            cost_item = cost_map.get(norm_pip_id, {})
+                            cost_val = cost_item.get("cost")
+                            currency = cost_item.get("currency", context.currency)
+                            monthly_price = float(cost_val) if (cost_val is not None and cost_val > 0) else await PricingEngine.get_public_ip_monthly_price(sku_name, pip_region, currency)
                             parsed = parse_azure_resource_id(pip_id)
                             rg_name = parsed.get("resource_group") or "Unknown"
                             tags = pip.get("tags") or {}
@@ -149,31 +164,32 @@ class OrphanResourcesAssessment(BaseAssessment):
                                     resource_name=pip_name,
                                     resource_type="Microsoft.Network/publicIPAddresses",
                                     resource_id=pip_id,
-                                    region=pip.get("location", "global"),
+                                    region=pip_region or "global",
                                     severity="Low",
                                     status="Unassociated Public IP",
                                     current_configuration=f"SKU: {sku_name} | Allocation: {props.get('publicIPAllocationMethod', 'Static')}",
                                     measured_value="ipConfiguration property is null",
                                     recommended_configuration="Disassociate or release unattached public IP address",
                                     recommendation=f"Public IP '{pip_name}' is not associated with any NIC or resource and incurs hourly reservation charges.",
-                                    metric_period="Current configuration",
+                                    metric_period=f"Last Completed Month ({cost_month})",
                                     data_source="Microsoft.Network PublicIPAddresses API",
                                     evidence={
                                         "ip_configuration": None,
                                         "sku": sku_name,
                                         "ip_address": props.get("ipAddress", "Pending"),
-                                        "actual_cost_mtd": round(monthly_price, 2),
+                                        "actual_cost_mtd": round(monthly_price, 2) if monthly_price is not None else None,
+                                        "savings_pct": 100.0 if (monthly_price is not None and monthly_price > 0) else None,
                                         "environment": env_val,
                                         "orphan_reason": "Public IP is not associated with any network interface"
                                     },
-                                    current_monthly_cost=round(monthly_price, 2),
-                                    estimated_monthly_savings=round(monthly_price, 2),
-                                    estimated_annual_savings=round(monthly_price * 12, 2),
-                                    currency=context.currency,
-                                    savings_type="Actual Cost",
-                                    confidence="High",
-                                    calculation_method="100% avoidable public IP reservation fee",
-                                    validation_required="Confirm no inbound DNS routing dependencies before deleting",
+                                    current_monthly_cost=round(monthly_price, 2) if monthly_price is not None else None,
+                                    estimated_monthly_savings=round(monthly_price, 2) if monthly_price is not None else None,
+                                    estimated_annual_savings=round(monthly_price * 12, 2) if monthly_price is not None else None,
+                                    currency=currency,
+                                    savings_type="Actual Cost" if (cost_val is not None and cost_val > 0) else ("Estimated Savings" if monthly_price is not None else "Not Estimated"),
+                                    confidence="High" if monthly_price is not None else "Low",
+                                    calculation_method="Monthly savings = eligible current monthly cost (100% if fully removed and charges cease); annual = monthly * 12",
+                                    validation_required="Confirm orphan + deletion approval and no inbound DNS routing dependencies",
                                     collected_at=now_str
                                 )
                             )
@@ -184,6 +200,8 @@ class OrphanResourcesAssessment(BaseAssessment):
                 try:
                     nics = await NetworkAdapter.get_network_interfaces(context.client, sub.subscription_id)
                     for nic in nics:
+                        if not matches_target_tags(nic.get("tags"), context.target_tags):
+                            continue
                         sub_eval_count += 1
                         props = nic.get("properties", {})
                         vm_ref = props.get("virtualMachine")
@@ -192,7 +210,6 @@ class OrphanResourcesAssessment(BaseAssessment):
                         if not vm_ref and not priv_end and not hosted_workloads:
                             nic_name = nic.get("name", "")
                             nic_id = nic.get("id", "")
-                            monthly_price = PricingEngine.NIC_MONTHLY
                             parsed = parse_azure_resource_id(nic_id)
                             rg_name = parsed.get("resource_group") or "Unknown"
                             tags = nic.get("tags") or {}
@@ -242,13 +259,15 @@ class OrphanResourcesAssessment(BaseAssessment):
                 # 4. Empty App Service Plans (numberOfSites == 0 & unreferenced by web/function apps)
                 try:
                     plans = await ResourcesAdapter.get_app_service_plans(context.client, sub.subscription_id)
-                    web_apps = await ResourcesAdapter.get_web_apps(context.client, sub.subscription_id)
+                    web_apps = await ResourcesAdapter.get_app_services(context.client, sub.subscription_id)
                     active_plan_ids = {
                         (app.get("properties", {}).get("serverFarmId") or "").lower()
                         for app in web_apps if app.get("properties", {}).get("serverFarmId")
                     }
 
                     for plan in plans:
+                        if not matches_target_tags(plan.get("tags"), context.target_tags):
+                            continue
                         sub_eval_count += 1
                         plan_id = plan.get("id", "")
                         plan_props = plan.get("properties", {})
@@ -256,11 +275,16 @@ class OrphanResourcesAssessment(BaseAssessment):
 
                         if num_sites == 0 and plan_id.lower() not in active_plan_ids:
                             plan_name = plan.get("name", "")
+                            plan_region = plan.get("location", "")
                             sku_info = plan.get("sku", {})
-                            sku_tier = sku_info.get("tier", "Standard")
-                            sku_size = sku_info.get("name", sku_info.get("size", "S1"))
+                            sku_tier = sku_info.get("tier", "")
+                            sku_size = sku_info.get("name", sku_info.get("size", ""))
                             capacity = int(sku_info.get("capacity") or plan_props.get("targetWorkerCount") or 1)
-                            monthly_price = PricingEngine.get_app_service_plan_monthly_price(sku_tier, sku_size, capacity)
+                            norm_plan_id = normalize_resource_id(plan_id)
+                            cost_item = cost_map.get(norm_plan_id, {})
+                            cost_val = cost_item.get("cost")
+                            currency = cost_item.get("currency", context.currency)
+                            monthly_price = float(cost_val) if (cost_val is not None and cost_val > 0) else await PricingEngine.get_app_service_plan_monthly_price(sku_size, sku_tier, capacity, plan_region, currency)
 
                             parsed = parse_azure_resource_id(plan_id)
                             rg_name = parsed.get("resource_group") or "Unknown"
@@ -283,8 +307,8 @@ class OrphanResourcesAssessment(BaseAssessment):
                                     resource_name=plan_name,
                                     resource_type="Microsoft.Web/serverfarms",
                                     resource_id=plan_id,
-                                    region=plan.get("location", "global"),
-                                    severity="High" if monthly_price > 100 else ("Medium" if monthly_price > 0 else "Low"),
+                                    region=plan_region or "global",
+                                    severity="High" if (monthly_price or 0) > 100 else ("Medium" if (monthly_price or 0) > 0 else "Low"),
                                     status="Orphan App Service Plan (No Apps)",
                                     current_configuration=f"SKU: {sku_tier} {sku_size} | Capacity: {capacity} | Active Sites: 0",
                                     measured_value="numberOfSites is 0 with no active Web or Function Apps attached",
@@ -298,17 +322,18 @@ class OrphanResourcesAssessment(BaseAssessment):
                                         "sku_tier": sku_tier,
                                         "capacity": capacity,
                                         "environment": env_val,
-                                        "actual_cost_mtd": round(monthly_price, 2),
+                                        "actual_cost_mtd": round(monthly_price, 2) if monthly_price is not None else None,
+                                        "savings_pct": 100.0 if (monthly_price is not None and monthly_price > 0) else None,
                                         "orphan_reason": "App Service Plan has 0 attached web or function apps"
                                     },
-                                    current_monthly_cost=round(monthly_price, 2),
-                                    estimated_monthly_savings=round(monthly_price, 2),
-                                    estimated_annual_savings=round(monthly_price * 12, 2),
-                                    currency=context.currency,
-                                    savings_type="Actual Cost",
-                                    confidence="High",
-                                    calculation_method="100% avoidable monthly App Service Plan compute rate",
-                                    validation_required="Confirm with application teams before deleting App Service Plan",
+                                    current_monthly_cost=round(monthly_price, 2) if monthly_price is not None else None,
+                                    estimated_monthly_savings=round(monthly_price, 2) if monthly_price is not None else None,
+                                    estimated_annual_savings=round(monthly_price * 12, 2) if monthly_price is not None else None,
+                                    currency=currency,
+                                    savings_type="Actual Cost" if (cost_val is not None and cost_val > 0) else ("Estimated Savings" if monthly_price is not None else "Not Estimated"),
+                                    confidence="High" if monthly_price is not None else "Low",
+                                    calculation_method="Monthly savings = eligible current monthly cost (100% if fully removed and charges cease); annual = monthly * 12",
+                                    validation_required="Confirm orphan + deletion approval with application teams before deleting App Service Plan",
                                     collected_at=now_str
                                 )
                             )

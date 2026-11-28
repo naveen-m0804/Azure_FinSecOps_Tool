@@ -1,6 +1,7 @@
 import datetime
 import time
 import logging
+import re
 from typing import List, Dict, Any
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
@@ -10,6 +11,53 @@ from app.azure.defender import DefenderAdapter
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
 
 logger = logging.getLogger("azure_finsecops.assessments.vm_patching")
+
+
+def _resolve_vm_os_display(props: Dict[str, Any], instance_view: Dict[str, Any]) -> tuple[str, str]:
+    """Derives clean OS type and OS version string from VM instanceView and imageReference."""
+    storage_profile = props.get("storageProfile", {}) or {}
+    image_ref = storage_profile.get("imageReference", {}) or {}
+    os_disk = storage_profile.get("osDisk", {}) or {}
+    os_profile = props.get("osProfile", {}) or {}
+
+    os_type = os_disk.get("osType")
+    if not os_type:
+        if os_profile.get("windowsConfiguration") or "win" in str(image_ref).lower() or "ws20" in str(image_ref).lower():
+            os_type = "Windows"
+        elif os_profile.get("linuxConfiguration"):
+            os_type = "Linux"
+        else:
+            os_type = "Windows / Linux"
+
+    iv_name = str(instance_view.get("osName") or "").strip()
+    iv_ver = str(instance_view.get("osVersion") or "").strip()
+    if iv_name and iv_ver:
+        return os_type, f"{iv_name} ({iv_ver})"
+    if iv_ver:
+        return os_type, iv_ver
+
+    offer = str(image_ref.get("offer") or "").strip()
+    sku = str(image_ref.get("sku") or "").strip()
+    exact_ver = str(image_ref.get("exactVersion") or "").strip()
+    ver = str(image_ref.get("version") or "").strip()
+
+    sql_ws_match = re.search(r'sql(\d{4})[-_]ws(\d{4})', offer.lower())
+    if sql_ws_match:
+        sql_yr, ws_yr = sql_ws_match.group(1), sql_ws_match.group(2)
+        base = f"Windows Server {ws_yr} (SQL {sql_yr})"
+        return os_type, f"{base} ({exact_ver})" if exact_ver else base
+
+    if offer or sku:
+        parts = [p for p in (offer, sku) if p and p.lower() != "latest"]
+        label = " ".join(parts)
+        if exact_ver and exact_ver.lower() != "latest":
+            return os_type, f"{label} ({exact_ver})"
+        if ver and ver.lower() != "latest":
+            return os_type, f"{label} ({ver})"
+        return os_type, label
+
+    return os_type, "Custom / Unmanaged Image"
+
 
 class VmPatchingAssessment(BaseAssessment):
     assessment_id = "vm_patching"
@@ -38,59 +86,46 @@ class VmPatchingAssessment(BaseAssessment):
         for sub in context.subscriptions:
             vms = await ComputeAdapter.get_vms(context.client, sub.subscription_id, expand_instance_view=True)
 
-            # 1. Fetch ARG patch assessment summaries for the subscription
+            # 1. Fetch ARG patch assessment summaries & individual software patches for the subscription
             arg_patch_map: Dict[str, Dict[str, Any]] = {}
             try:
                 arg_patches = await ComputeAdapter.get_all_patch_assessments_via_arg(context.client, sub.subscription_id)
                 for ap in arg_patches:
                     target_id = ap.get("id") or ap.get("properties", {}).get("targetResourceId") or ""
                     if target_id:
-                        # Extract VM ID from patch result ID
-                        # Format: .../virtualMachines/{vmName}/patchAssessmentResults/...
                         vm_prefix = target_id.lower().split("/patchassessmentresults")[0]
                         arg_patch_map[normalize_resource_id(vm_prefix)] = ap.get("properties", {})
             except Exception as ex:
                 logger.debug("ARG patch assessment query for sub %s: %s", sub.subscription_id, ex)
 
+            arg_software_patches_map: Dict[str, List[Dict[str, Any]]] = {}
+            try:
+                sp_list = await ComputeAdapter.get_software_patches_via_arg(context.client, sub.subscription_id)
+                for sp in sp_list:
+                    sp_id = sp.get("id") or ""
+                    if "/patchassessmentresults" in sp_id.lower():
+                        vm_prefix = sp_id.lower().split("/patchassessmentresults")[0]
+                        arg_software_patches_map.setdefault(normalize_resource_id(vm_prefix), []).append(sp.get("properties", {}) or {})
+            except Exception as ex:
+                logger.debug("ARG software patches query for sub %s: %s", sub.subscription_id, ex)
+
             # 2. Query Defender recommendations for system updates dynamically
             defender_patch_vms: Dict[str, Dict[str, Any]] = {}
             try:
-                def_resp = await DefenderAdapter.get_security_assessments(context.client, sub.subscription_id, max_items=300)
-                if def_resp.get("success"):
-                    for ass in def_resp.get("value", []):
-                        props = ass.get("properties", {}) or {}
-                        meta = props.get("metadata", {}) or {}
-                        title = (meta.get("displayName") or props.get("displayName") or "").lower()
-                        status_code = str(props.get("status", {}).get("code", "")).lower()
-
-                        if status_code in ("unhealthy", "open") and any(
-                            kw in title for kw in ["system updates", "missing updates", "missing patches", "periodic assessment", "check for missing"]
-                        ):
-                            res_id = props.get("resourceDetails", {}).get("Id") or props.get("resourceDetails", {}).get("id") or ""
-                            if res_id:
-                                norm_id = normalize_resource_id(res_id)
-                                defender_patch_vms[norm_id] = {
-                                    "title": meta.get("displayName") or props.get("displayName"),
-                                    "severity": meta.get("severity", "High"),
-                                    "remediation": meta.get("remediationDescription") or meta.get("description")
-                                }
-
-                                # Also fetch sub-assessments for this specific update assessment
-                                ass_name = ass.get("name")
-                                if ass_name:
-                                    sub_resp = await DefenderAdapter.get_sub_assessments(context.client, sub.subscription_id, ass_name)
-                                    if sub_resp.get("success") and sub_resp.get("value"):
-                                        for s_item in sub_resp.get("value", []):
-                                            s_props = s_item.get("properties", {})
-                                            s_target = s_props.get("resourceDetails", {}).get("id") or s_props.get("resourceDetails", {}).get("Id") or ""
-                                            if s_target:
-                                                s_norm = normalize_resource_id(s_target)
-                                                if s_norm not in defender_patch_vms:
-                                                    defender_patch_vms[s_norm] = {
-                                                        "title": s_props.get("displayName", "Missing System Update"),
-                                                        "severity": s_props.get("status", {}).get("severity", "High"),
-                                                        "remediation": s_props.get("remediation", "Apply missing updates via Azure Update Manager.")
-                                                    }
+                def_items = await DefenderAdapter.get_security_assessments_via_arg(context.client, sub.subscription_id, unhealthy_only=True)
+                for ass in def_items:
+                    props = ass.get("properties", {}) or {}
+                    meta = props.get("metadata", {}) or {}
+                    title = (meta.get("displayName") or props.get("displayName") or "").lower()
+                    if any(kw in title for kw in ["system updates", "missing updates", "missing patches", "periodic assessment", "cumulative update"]):
+                        res_id = props.get("resourceDetails", {}).get("Id") or props.get("resourceDetails", {}).get("id") or ""
+                        if res_id:
+                            norm_id = normalize_resource_id(res_id)
+                            defender_patch_vms[norm_id] = {
+                                "title": meta.get("displayName") or props.get("displayName"),
+                                "severity": meta.get("severity", "High"),
+                                "remediation": meta.get("remediationDescription") or meta.get("description")
+                            }
             except Exception as ex:
                 logger.debug("Defender system updates scan for sub %s: %s", sub.subscription_id, ex)
 
@@ -105,11 +140,8 @@ class VmPatchingAssessment(BaseAssessment):
                 vm_location = vm.get("location", "global")
 
                 props = vm.get("properties", {}) or {}
-                storage_profile = props.get("storageProfile", {}) or {}
-                image_ref = storage_profile.get("imageReference", {}) or {}
-                os_disk = storage_profile.get("osDisk", {}) or {}
-                os_type = os_disk.get("osType") or "Windows / Linux"
-                os_version = image_ref.get("sku") or image_ref.get("offer") or "Unknown OS Version"
+                instance_view = props.get("instanceView", {}) or {}
+                os_type, os_version = _resolve_vm_os_display(props, instance_view)
 
                 crit_count = 0
                 sec_count = 0
@@ -119,13 +151,12 @@ class VmPatchingAssessment(BaseAssessment):
                 last_assess_date = now_str[:10]
                 has_valid_assessment = False
                 assessment_status = "Succeeded"
+                patch_details: List[str] = []
 
-                # A. Check ARG patch assessment data
+                # A. Check ARG patch assessment data (authoritative Azure Update Manager)
                 if norm_vm_id in arg_patch_map:
                     has_valid_assessment = True
                     ap_props = arg_patch_map[norm_vm_id]
-                    bundled_count = int(ap_props.get("criticalAndSecurityPatchCount", 0))
-                    other_count = int(ap_props.get("otherPatchCount", 0))
                     reboot_pending = bool(ap_props.get("rebootPending", False))
                     last_mod = ap_props.get("lastModifiedDateTime")
                     if last_mod:
@@ -133,7 +164,37 @@ class VmPatchingAssessment(BaseAssessment):
                     if ap_props.get("status"):
                         assessment_status = str(ap_props.get("status"))
 
-                    # Parse availablePatches directly if ARG returned the array
+                    # Modern ARG schema: availablePatchCountByClassification
+                    by_cls = ap_props.get("availablePatchCountByClassification")
+                    if isinstance(by_cls, dict):
+                        crit_count = int(by_cls.get("critical", 0))
+                        sec_count = int(by_cls.get("security", 0))
+                        other_count = sum(
+                            int(by_cls.get(k, 0))
+                            for k in ("definition", "updateRollup", "servicePack", "featurePack", "updates", "tools")
+                        )
+                    else:
+                        bundled_count = int(ap_props.get("criticalAndSecurityPatchCount", 0))
+                        other_count = int(ap_props.get("otherPatchCount", 0))
+
+                    # Parse individual software patches from ARG if available
+                    vm_sp = arg_software_patches_map.get(norm_vm_id, [])
+                    if vm_sp:
+                        c_sp, s_sp, o_sp = 0, 0, 0
+                        for sp in vm_sp:
+                            cls_list = [str(c).lower() for c in sp.get("classifications", [])]
+                            p_name = str(sp.get("patchName") or "")
+                            if p_name:
+                                patch_details.append(p_name)
+                            if "critical" in cls_list:
+                                c_sp += 1
+                            elif "security" in cls_list:
+                                s_sp += 1
+                            else:
+                                o_sp += 1
+                        if crit_count == 0 and sec_count == 0 and other_count == 0:
+                            crit_count, sec_count, other_count = c_sp, s_sp, o_sp
+
                     for p in ap_props.get("availablePatches", []):
                         classifications = [str(c).lower() for c in p.get("classifications", [])]
                         title_lower = str(p.get("title", "")).lower()
@@ -144,8 +205,8 @@ class VmPatchingAssessment(BaseAssessment):
                         else:
                             other_count += 1
 
-                # B. Query direct Azure Update Manager patch assessment endpoint if counts need itemization
-                if not has_valid_assessment or (crit_count == 0 and sec_count == 0):
+                # B. Fallback to direct REST patchAssessmentResults/latest only when ARG had no record
+                if not has_valid_assessment:
                     patch_res = await ComputeAdapter.get_vm_patch_assessment_latest(context.client, sub.subscription_id, rg_name, vm_name)
                     if patch_res.get("success"):
                         has_valid_assessment = True
@@ -176,7 +237,7 @@ class VmPatchingAssessment(BaseAssessment):
                                 assessment_status = str(summary_info.get("status"))
 
                 # C. Check VM Instance View patchStatus if still unresolved
-                if not has_valid_assessment or (crit_count == 0 and sec_count == 0 and bundled_count == 0 and not reboot_pending):
+                if not has_valid_assessment:
                     iv = await ComputeAdapter.get_vm_instance_view(context.client, vm_id)
                     if iv.get("success"):
                         ps = iv.get("patch_status", {}) or {}
@@ -192,22 +253,18 @@ class VmPatchingAssessment(BaseAssessment):
                             if summary.get("status"):
                                 assessment_status = str(summary.get("status"))
 
-                # D. Cross-reference Defender for Cloud system update recommendations
-                if norm_vm_id in defender_patch_vms:
+                # D. Cross-reference Defender for Cloud system update recommendations (only if Update Manager had no record)
+                if not has_valid_assessment and norm_vm_id in defender_patch_vms:
                     has_valid_assessment = True
-                    def_info = defender_patch_vms[norm_vm_id]
-                    if crit_count == 0 and sec_count == 0 and bundled_count == 0 and not reboot_pending:
-                        sec_count = 1
+                    sec_count = 1
 
-                # If only bundled criticalAndSecurityPatchCount was returned without itemized array:
-                # Accurately assign bundled patches to security updates (predominant in Azure updates)
                 if crit_count == 0 and sec_count == 0 and bundled_count > 0:
                     sec_count = bundled_count
 
                 total_pending_patches = crit_count + sec_count + other_count
 
-                # Report finding if patches are missing or reboot is pending
-                if total_pending_patches > 0 or reboot_pending:
+                # Report finding only for VMs that actually need to update patches
+                if total_pending_patches > 0:
                     reboot_str = "Yes" if reboot_pending else "No"
                     if reboot_pending and total_pending_patches > 0:
                         patch_status = f"{total_pending_patches} Updates Pending (Reboot Required)"
@@ -216,10 +273,10 @@ class VmPatchingAssessment(BaseAssessment):
                     else:
                         patch_status = f"{total_pending_patches} Updates Pending"
 
-                    severity = "High" if (crit_count > 0 or total_pending_patches >= 5) else "Medium"
+                    severity = "High" if (crit_count > 0 or sec_count > 0 or total_pending_patches >= 5) else "Medium"
                     rec_guidance = (
                         f"Virtual machine '{vm_name}' has {total_pending_patches} pending updates "
-                        f"({crit_count} Critical, {sec_count} Security, Reboot Pending: {reboot_str}). "
+                        f"({crit_count} Critical, {sec_count} Security, {other_count} Other/Definition, Reboot Pending: {reboot_str}). "
                         f"Apply updates via Azure Update Manager during the scheduled maintenance window."
                     )
 
@@ -237,9 +294,9 @@ class VmPatchingAssessment(BaseAssessment):
                             region=vm_location,
                             severity=severity,
                             status="Non-Compliant",
-                            current_configuration=f"Critical: {crit_count} | Security: {sec_count} | Total Pending: {total_pending_patches} | Reboot Required: {reboot_str}",
-                            measured_value=f"{total_pending_patches} Pending ({crit_count} Critical, {sec_count} Security)",
-                            recommended_configuration="Install pending Critical/Security updates and reboot VM",
+                            current_configuration=f"Critical: {crit_count} | Security: {sec_count} | Other: {other_count} | Reboot Required: {reboot_str}",
+                            measured_value=f"{total_pending_patches} Pending ({crit_count} Critical, {sec_count} Security, {other_count} Other)",
+                            recommended_configuration="Install pending updates via Azure Update Manager",
                             recommendation=rec_guidance,
                             metric_period="Azure Update Manager & Defender for Cloud",
                             data_source="Azure Update Manager & Defender for Cloud",
@@ -254,13 +311,13 @@ class VmPatchingAssessment(BaseAssessment):
                                 "total_pending_patches": total_pending_patches,
                                 "missing_higher_patches": crit_count,
                                 "missing_medium_patches": sec_count,
-                                "patch_breakdown": f"Critical: {crit_count}, Security: {sec_count}",
+                                "patch_breakdown": f"Critical: {crit_count}, Security: {sec_count}, Other: {other_count}",
+                                "pending_patch_names": patch_details[:5],
                                 "reboot_required": reboot_pending,
                                 "patch_status": patch_status,
                                 "security_control": "Apply system updates",
-                                "potential_score_increase": f"+{3.0 if crit_count > 0 else 1.5:.1f}%",
                             },
-                            security_score_impact=3.0 if crit_count > 0 else 1.5,
+                            security_score_impact=None,
                             collected_at=now_str
                         )
                     )
@@ -276,8 +333,6 @@ class VmPatchingAssessment(BaseAssessment):
         else:
             status = AssessmentStatus.NO_FINDINGS
 
-        total_score_impact = round(sum(f.security_score_impact for f in findings if f.security_score_impact), 1) if findings else None
-
         return AssessmentResult(
             assessment_id=self.assessment_id,
             category=self.category,
@@ -287,7 +342,7 @@ class VmPatchingAssessment(BaseAssessment):
             findings_count=len(findings),
             findings=findings,
             errors=errors,
-            security_score_improvement=total_score_impact,
+            security_score_improvement=None,
             execution_time_seconds=round(time.time() - start_t, 2),
             last_run_time=now_str
         )

@@ -28,6 +28,26 @@ class DatabaseAdapter:
         return all_servers
 
     @staticmethod
+    async def get_sql_virtual_machines(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
+        """Retrieves Azure SQL Virtual Machines (Microsoft.SqlVirtualMachine/sqlVirtualMachines) with pagination."""
+        url: Optional[str] = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.SqlVirtualMachine/sqlVirtualMachines?api-version=2022-02-01"
+        all_sql_vms: List[Dict[str, Any]] = []
+
+        while url:
+            try:
+                resp = await client.execute_request("GET", url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    all_sql_vms.extend(data.get("value", []))
+                    url = data.get("nextLink")
+                else:
+                    break
+            except Exception:
+                break
+
+        return all_sql_vms
+
+    @staticmethod
     async def get_sql_databases(client: AzureClientBase, server_id: str) -> List[Dict[str, Any]]:
         """Retrieves SQL databases under a server with pagination."""
         clean_id = server_id.lstrip("/")

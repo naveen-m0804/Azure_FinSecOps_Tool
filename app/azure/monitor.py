@@ -18,10 +18,13 @@ class MonitorAdapter:
         Mirrors Get-AzMetric from PowerShell scripts.
         """
         clean_res_id = resource_id.lstrip("/")
-        url = f"https://management.azure.com/{clean_res_id}/providers/Microsoft.Insights/metrics?api-version=2018-01-01"
+        url = f"https://management.azure.com/{clean_res_id}/providers/Microsoft.Insights/metrics"
+        clean_start = str(start_time).replace("+00:00", "Z")
+        clean_end = str(end_time).replace("+00:00", "Z")
         params = {
+            "api-version": "2018-01-01",
             "metricnames": metric_names,
-            "timespan": f"{start_time}/{end_time}",
+            "timespan": f"{clean_start}/{clean_end}",
             "interval": time_grain,
             "aggregation": aggregation,
         }

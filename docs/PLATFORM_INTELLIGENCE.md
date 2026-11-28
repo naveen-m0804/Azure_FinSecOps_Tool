@@ -56,13 +56,14 @@ The platform models security posture directly against Microsoft Defender for Clo
 ### 2.2 Defensible Cost Modeling vs. Naive "MTD $\times$ 12" Calculations
 A common failure of automated FinOps scripts is simply taking a resource's Month-to-Date (MTD) cost and multiplying it by 12. This creates inflated, indefensible estimates that fail financial audit. 
 
-The platform enforces **strict defensible savings modeling**:
-1. **Right-Sizing Delta Modeling (`COST-01`, `COST-10`):** When a virtual machine or database is underutilized, savings are modeled as the delta between the *Current SKU Rate* and the *Recommended Target SKU Rate* based on performance baselines.
-2. **Deallocation & Idle Off-Hours Modeling (`COST-08`, `COST-17`):** For non-production workloads running 24/7 without shutdown policies, savings represent the 128 off-peak weekly hours (evenings and weekends) where compute charges are eliminated:
-   $$\text{Monthly Savings} = \text{Hourly VM Rate} \times 128\ \text{hours} \times 4.33\ \text{weeks}$$
-3. **Storage Tiering & Redundancy Delta (`COST-12`, `COST-18`):** Savings represent the difference between premium/redundant storage (e.g., GRS at \$0.045/GB) and standard local storage (LRS at \$0.019/GB).
-4. **Standard Display Format:** All cost savings are displayed as:
-   $$\mathbf{\$X,XXX.XX\ \ (\$YY.YY/\text{month})}$$
+The platform enforces **strict dynamic pricing & formula-guided savings modeling** (zero hardcoded prices or fallback multipliers):
+1. **Dynamic Pricing Sources (`PricingEngine` + `CostManagementAdapter`):** Current resource costs are fetched from **Azure Cost Management `ActualCost`** in the subscription's real billing currency (`USD`, `EUR`, `INR`, etc.), and missing/proposed SKU prices are fetched live from the **Azure Retail Prices API** (`prices.azure.com`).
+2. **Right-Sizing Delta Modeling (`COST-01`, `COST-03`, `COST-04`, `COST-10`):** Savings equal `current eligible cost - proposed/recommended SKU cost` (`annual = monthly * 12`). For partial-month disk billing, the regional retail tier-downgrade ratio is applied.
+3. **Auto-Shutdown & Off-Hours Modeling (`COST-08`, `COST-17`):**
+   - `COST-08`: Compute-only proxy excluding disks/NICs (`savings % = stoppable_hours_year / 8760`).
+   - `COST-17`: Weekday 10h/day × 5 days/week off-hours proxy (`2600 / 8760 = 29.68%` of eligible VM compute cost).
+4. **Storage Tiering & Redundancy Delta (`COST-12`, `COST-18`):** Savings are computed dynamically from regional Azure Retail Prices unit rates (Hot vs. Cool for lifecycle tiering; current redundancy vs. LRS for redundancy optimization).
+5. **Non-Additive Reference Modules (`COST-05`, `COST-06`, `COST-09`):** Monthly Billing Comparison (`COST-05`), Top 20 Optimization Opportunities (`COST-06`), and Disk Space Alert (`COST-09`) are strictly excluded from additive savings totals to prevent double-counting.
 
 ### 2.3 Production vs. Non-Production Resolution Engine
 To protect mission-critical environments, cost assessments that apply aggressive shutdowns or redundancy downgrades strictly exclude production workloads. The platform incorporates a comprehensive case-insensitive detection engine (`is_production_resource`):

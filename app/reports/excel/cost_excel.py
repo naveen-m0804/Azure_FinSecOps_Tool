@@ -11,7 +11,7 @@ from app.reports.excel.styles import (
     ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT, ALIGN_WRAP, BORDER_BOX
 )
 from app.assessments.registry import assessment_registry
-from app.reports.cost_report_schema import COST_REPORT_SPECS, extract_cost_finding_row
+from app.reports.cost_report_schema import COST_REPORT_SPECS, extract_cost_finding_row, get_currency_symbol
 
 def sanitize_sheet_title(name: str) -> str:
     cleaned = re.sub(r'[/\\?*\[\]:]', '-', name).strip()
@@ -46,7 +46,7 @@ def generate_cost_excel(job_data: Dict[str, Any], workspace_name: str, tenant_id
 
     summary = job_data.get("summary", {})
     currency = summary.get("currency", "USD")
-    curr_symbol = "$" if not currency or currency == "USD" else f"{currency} "
+    curr_symbol = get_currency_symbol(currency)
     tot_monthly = summary.get("total_monthly_savings", summary.get("unique_monthly_savings", 0.0))
     tot_annual = summary.get("total_annual_savings", summary.get("unique_annual_savings", 0.0))
     findings_count = summary.get("cost_findings_count", 0)

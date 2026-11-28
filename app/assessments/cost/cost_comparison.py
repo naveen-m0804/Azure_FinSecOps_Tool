@@ -6,9 +6,10 @@ from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
 from app.azure.cost_management import CostManagementAdapter
+from app.azure.resources import ResourcesAdapter
 from app.utils.dates import get_previous_calendar_month, get_current_month_to_date
-from app.utils.resource_ids import parse_azure_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
+from app.utils.environment import resolve_environment, matches_target_tags
 
 
 def _extract_resource_group(resource_id: str, fallback: Optional[str] = None) -> str:
@@ -120,10 +121,25 @@ class CostComparisonAssessment(BaseAssessment):
                 )
 
             # Individual Resource / Service Comparison Findings
+            resource_tag_map: Dict[str, Dict[str, Any]] = {}
+            if context.target_tags:
+                try:
+                    sub_resources = await ResourcesAdapter.get_subscription_resources(context.client, sub.subscription_id)
+                    for sr in sub_resources:
+                        sid = sr.get("id")
+                        if sid:
+                            resource_tag_map[normalize_resource_id(sid)] = sr.get("tags") or {}
+                except Exception:
+                    pass
+
             all_res_ids = set(prev_costs.keys()) | set(curr_costs.keys())
             resource_findings: List[FindingModel] = []
 
             for r_id in all_res_ids:
+                if context.target_tags:
+                    res_tags = resource_tag_map.get(normalize_resource_id(r_id), {})
+                    if not matches_target_tags(res_tags, context.target_tags):
+                        continue
                 p_item = prev_costs.get(r_id, {})
                 c_item = curr_costs.get(r_id, {})
                 p_val = float(p_item.get("cost", 0.0))

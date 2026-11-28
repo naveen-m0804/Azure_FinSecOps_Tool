@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
-from app.azure.defender import DefenderAdapter
+from app.azure.defender import DefenderAdapter, clean_html_text
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
 
 logger = logging.getLogger("azure_finsecops.assessments.high_priority_recommendations")
@@ -81,10 +81,12 @@ class HighPriorityRecommendationsAssessment(BaseAssessment):
         errors: List[str] = []
         resources_evaluated = 0
 
-        # Fetch metadata cache for deep enrichment if properties.metadata is empty
+        # Fetch metadata cache & security control map for deep enrichment
         meta_cache: Dict[str, Dict[str, Any]] = {}
+        control_map: Dict[str, str] = {}
         try:
             meta_cache = await DefenderAdapter.get_assessment_metadata(context.client)
+            control_map = await DefenderAdapter.get_security_control_map(context.client)
         except Exception:
             pass
 
@@ -177,12 +179,13 @@ class HighPriorityRecommendationsAssessment(BaseAssessment):
 
                 if rec_key not in grouped_recommendations:
                     # Description
-                    description = (
+                    raw_desc = (
                         metadata.get("description")
                         or status_obj.get("description")
                         or props.get("description")
                         or f"High-priority security configuration gap identified by Defender for Cloud: {display_name}"
-                    ).strip()
+                    )
+                    description = clean_html_text(raw_desc) or f"High-priority security configuration gap identified by Defender for Cloud: {display_name}"
 
                     # Official Azure Remediation guidance
                     remediation_raw = (
@@ -193,21 +196,25 @@ class HighPriorityRecommendationsAssessment(BaseAssessment):
                         or ""
                     )
                     if isinstance(remediation_raw, list):
-                        remediation = "\n".join(str(s) for s in remediation_raw if s).strip()
+                        remediation = clean_html_text("\n".join(str(s) for s in remediation_raw if s))
                     else:
-                        remediation = str(remediation_raw).strip()
+                        remediation = clean_html_text(remediation_raw)
                     if not remediation:
                         remediation = f"Remediate Defender recommendation '{display_name}' according to official Microsoft Azure guidance."
 
-                    # Related Security Control
+                    # Related Security Control from official Defender secureScoreControlDefinitions
+                    rec_cat = metadata.get("recommendationCategory")
                     sec_ctrl = (
-                        metadata.get("securityControl")
+                        control_map.get(meta_id)
+                        or control_map.get(item_name.lower())
+                        or metadata.get("securityControl")
+                        or (re.sub(r"(?<!^)([A-Z])", r" \1", str(rec_cat)) if rec_cat else None)
                         or (metadata.get("categories")[0] if metadata.get("categories") else None)
                         or props.get("category")
-                        or "Remediate security configurations"
+                        or "--"
                     ).strip()
 
-                    # Potential Secure Score Increase
+                    # Potential Secure Score Increase (strictly from Azure metadata if provided)
                     raw_impact = (
                         metadata.get("securityScoreImpact")
                         or metadata.get("scoreImpact")
@@ -218,11 +225,11 @@ class HighPriorityRecommendationsAssessment(BaseAssessment):
                     score_impact = None
                     if raw_impact is not None:
                         try:
-                            score_impact = float(raw_impact)
+                            val = float(raw_impact)
+                            if val > 0:
+                                score_impact = val
                         except (ValueError, TypeError):
                             score_impact = None
-                    if score_impact is None or score_impact <= 0:
-                        score_impact = 3.0
 
                     grouped_recommendations[rec_key] = {
                         "metadata_id": meta_id or item_name,
@@ -284,7 +291,7 @@ class HighPriorityRecommendationsAssessment(BaseAssessment):
                     else f"/subscriptions/{sub.subscription_id}/providers/Microsoft.Security/assessments/{rec['metadata_id']}"
                 )
 
-                pot_score_str = f"+{rec['score_impact']:.1f}%"
+                pot_score_str = f"+{rec['score_impact']:.1f}%" if rec.get("score_impact") else "--"
                 clean_f_id = f"sec04-{sub.subscription_id[:8]}-{rec['metadata_id'][:12].replace('/', '-')}"
 
                 findings.append(
@@ -317,7 +324,7 @@ class HighPriorityRecommendationsAssessment(BaseAssessment):
                             "affected_resources": [r["resource_name"] for r in affected],
                             "affected_resource_ids": [r["resource_id"] for r in affected],
                         },
-                        security_score_impact=float(rec["score_impact"]),
+                        security_score_impact=float(rec["score_impact"]) if rec.get("score_impact") else None,
                         collected_at=now_str
                     )
                 )

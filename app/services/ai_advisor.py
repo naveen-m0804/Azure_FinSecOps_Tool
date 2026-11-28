@@ -34,7 +34,7 @@ class AIAdvisorService:
         """
         Unified Agentic AI Chat Pipeline:
         Dynamically classifies intent, selects read-only Azure tools, queries live tenant,
-        inspects session assessment reports, and synthesizes accurate responses using Groq.
+        inspects session assessment reports, and synthesizes accurate responses using Vertex AI.
         """
         return await FinSecOpsAgentOrchestrator.process_request(
             user_message=user_message,

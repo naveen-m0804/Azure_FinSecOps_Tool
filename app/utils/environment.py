@@ -288,3 +288,26 @@ def resolve_environment(
         return "Staging"
 
     return "Unassigned"
+
+
+def matches_target_tags(
+    tags: Optional[Dict[str, Any]] = None,
+    target_tags: Optional[List[str]] = None,
+) -> bool:
+    """
+    If user entered target_tags, returns True ONLY if the resource's tags match
+    at least one entered tag (key, value, or key=value / key:value, case-insensitive).
+    If no target_tags were entered, returns True for all resources (tagged or untagged).
+    """
+    clean_targets = [str(t).strip().lower() for t in (target_tags or []) if str(t).strip()]
+    if not clean_targets:
+        return True
+    if not tags or not isinstance(tags, dict):
+        return False
+    for tt in clean_targets:
+        for k, v in tags.items():
+            k_str = str(k).strip().lower()
+            v_str = str(v).strip().lower() if v is not None else ""
+            if tt == k_str or tt == v_str or tt == f"{k_str}={v_str}" or tt == f"{k_str}:{v_str}":
+                return True
+    return False

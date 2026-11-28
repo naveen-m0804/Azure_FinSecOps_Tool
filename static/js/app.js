@@ -1939,7 +1939,7 @@ const SECURITY_COLUMNS_SPEC = {
     ]
   },
   "new_recommendations": {
-    columns: ["Subscription Name", "Resource Group", "Resource Name", "Resource Type", "Recommendation Name", "Severity", "Status", "First Detected", "Description", "Azure Remediation Recommendation", "Related Control", "Score Potential"],
+    columns: ["Subscription Name", "Resource Group", "Resource Name", "Resource Type", "Recommendation Name", "Severity", "Status", "First Detected", "Description", "Azure Remediation Recommendation", "Related Control"],
     extractor: (f) => [
       f.subscription_name,
       f.resource_group || "--",
@@ -1951,8 +1951,7 @@ const SECURITY_COLUMNS_SPEC = {
       f.evidence?.first_detected_date || "--",
       f.evidence?.description || f.current_configuration || "--",
       f.recommendation,
-      f.evidence?.security_control || "--",
-      f.security_score_impact ? `+${f.security_score_impact.toFixed(1)}%` : (f.evidence?.potential_score_increase || "--")
+      f.evidence?.security_control || "--"
     ]
   },
   "resources_without_logs": {
@@ -2062,19 +2061,22 @@ const SECURITY_COLUMNS_SPEC = {
     ]
   },
   "software_upgrades": {
-    columns: ["Subscription Name", "Resource Group", "Virtual Machine Name", "Region", "Software Name", "Publisher", "Installed Version", "Latest Verified Version", "Support Status", "End-of-Support Date", "Vulnerability Severity"],
+    columns: ["Subscription Name", "Resource Group", "Resource Name", "Resource Type", "Recommendation Name", "Severity", "Status", "First Detected", "Software Name", "Installed Version", "Latest / Fix Version", "Description", "Azure Remediation Recommendation", "Related Security Control"],
     extractor: (f) => [
       f.subscription_name,
       f.resource_group || "--",
       f.resource_name,
-      f.region || "global",
+      f.resource_type?.split("/").pop() || f.resource_type,
+      f.evidence?.recommendation_name || f.evidence?.software || "--",
+      getSeverityBadge(f.severity),
+      f.status || "Update Required",
+      f.evidence?.first_detected_date || "--",
       f.evidence?.software || f.evidence?.software_name || "--",
-      f.evidence?.publisher || "--",
       f.evidence?.installed_version || f.current_configuration || "--",
       f.evidence?.recommended_version || f.evidence?.latest_version || "--",
-      f.status,
-      f.evidence?.end_of_support_date || "--",
-      getSeverityBadge(f.severity)
+      f.evidence?.description || f.current_configuration || "--",
+      f.evidence?.remediation || f.recommendation || "--",
+      f.evidence?.security_control || "--"
     ]
   },
   "disk_encryption": {
@@ -2099,7 +2101,7 @@ const SECURITY_COLUMNS_SPEC = {
     ]
   },
   "tls_version": {
-    columns: ["Subscription Name", "Resource Group", "Resource Name", "Resource Type", "Region", "Service Name", "Minimum TLS", "Configured TLS", "Required TLS", "Status", "Security Control", "Score Potential", "Azure Remediation Recommendation"],
+    columns: ["Subscription Name", "Resource Group", "Resource Name", "Resource Type", "Region", "Service Name", "Minimum TLS", "Configured TLS", "Required TLS", "Status", "Security Control", "Azure Remediation Recommendation"],
     extractor: (f) => [
       f.subscription_name,
       f.resource_group || "--",
@@ -2112,7 +2114,6 @@ const SECURITY_COLUMNS_SPEC = {
       f.evidence?.required || "TLS 1.2",
       f.status,
       f.evidence?.security_control || "Enforce secure TLS version",
-      f.security_score_impact ? `+${f.security_score_impact.toFixed(1)}%` : "--",
       f.recommendation
     ]
   },
@@ -2164,16 +2165,17 @@ const COST_COL_HEADER = getLastMonthCostLabel();
 
 const COST_COLUMNS_SPEC = {
   "underutilized_vms": {
-    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "CPU Utilization", "Memory Utilization", COST_COL_HEADER, "Est. Annual Savings"],
+    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "Recommended Tier", "CPU Utilization", "Memory Utilization", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
-      f.evidence?.environment || "Production",
+      f.evidence?.environment || "--",
       f.evidence?.vm_size || f.evidence?.size || "--",
-      f.measured_value || `${f.evidence?.avg_cpu ?? 0.4}%`,
+      f.evidence?.recommended_sku || "--",
+      f.measured_value || (f.evidence?.avg_cpu !== undefined && f.evidence?.avg_cpu !== null ? `${f.evidence.avg_cpu}%` : "--"),
       f.evidence?.avg_memory || (f.evidence?.memory_utilization ? `${f.evidence.memory_utilization}%` : "Telemetry Unavailable"),
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
@@ -2191,31 +2193,34 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "underutilized_data_disks": {
-    columns: ["Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Disk Size", "IOPS Utilization", COST_COL_HEADER, "Est. Annual Savings"],
+    columns: ["Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Recommended Tier", "Disk Size", "IOPS Utilization", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.evidence?.vm_name || f.evidence?.attached_vm || "Attached",
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
-      f.evidence?.environment || "Production",
-      f.evidence?.disk_tier || f.evidence?.tier || "Premium SSD P30",
-      `${f.evidence?.disk_size_gb || 1024} GiB`,
-      f.measured_value || f.evidence?.iops_utilization || `Avg ${f.evidence?.avg_iops || 12} IOPS`,
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
+      f.evidence?.environment || "--",
+      f.evidence?.disk_tier || f.evidence?.tier || "--",
+      f.evidence?.recommended_tier || f.evidence?.proposed_sku || "--",
+      f.evidence?.disk_size_gb !== undefined && f.evidence?.disk_size_gb !== null ? `${f.evidence.disk_size_gb} GiB` : "--",
+      f.measured_value || f.evidence?.iops_utilization || (f.evidence?.avg_iops !== undefined && f.evidence?.avg_iops !== null ? `Avg ${f.evidence.avg_iops} IOPS` : "--"),
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
   "underutilized_os_disks": {
-    columns: ["OS Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Disk Size", COST_COL_HEADER, "Est. Annual Savings"],
+    columns: ["OS Disk Name", "VM Name", "Subscription", "Resource Group", "Environment", "Disk Tier", "Recommended Tier", "Disk Size", "IOPS Utilization", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.evidence?.vm_name || "Primary VM",
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
-      f.evidence?.environment || "Production",
-      f.evidence?.disk_tier || f.evidence?.tier || "Premium SSD P15",
-      `${f.evidence?.disk_size_gb || 128} GiB`,
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
+      f.evidence?.environment || "--",
+      f.evidence?.disk_tier || f.evidence?.tier || "--",
+      f.evidence?.recommended_tier || f.evidence?.proposed_sku || "--",
+      f.evidence?.disk_size_gb !== undefined && f.evidence?.disk_size_gb !== null ? `${f.evidence.disk_size_gb} GiB` : "--",
+      f.measured_value || f.evidence?.iops_utilization || "--",
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
@@ -2257,15 +2262,16 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "vm_license_ahb": {
-    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "License Status", COST_COL_HEADER, "Est. Annual Savings"],
+    columns: ["VM Name", "Subscription", "Resource Group", "Environment", "VM Size", "License Status", "Recommended License", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
-      f.evidence?.environment || "Production",
-      f.evidence?.vm_size || "Standard_D4s_v5",
-      f.evidence?.license_status || f.status || "Not Enabled (PAYG)",
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
+      f.evidence?.environment || "--",
+      f.evidence?.vm_size || "--",
+      f.evidence?.license_status || f.status || "--",
+      f.evidence?.recommended_license || "--",
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
@@ -2276,11 +2282,11 @@ const COST_COLUMNS_SPEC = {
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
       f.evidence?.environment || "NonProd",
-      f.evidence?.vm_size || "Standard_D2s_v5",
-      f.evidence?.power_state || f.evidence?.deallocated_status || "Running",
+      f.evidence?.vm_size || "--",
+      f.evidence?.power_state || f.evidence?.deallocated_status || "--",
       (f.evidence?.auto_shutdown_enabled || f.evidence?.auto_shutdown_status === "Enabled") ? "Yes" : "No",
       f.evidence?.scheduled_shutdown_time || (f.evidence?.shutdown_time ? `${f.evidence.shutdown_time} (${f.evidence?.timezone || 'UTC'})` : "Unavailable"),
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
@@ -2292,24 +2298,25 @@ const COST_COLUMNS_SPEC = {
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
       f.evidence?.environment || "Production",
-      `${f.evidence?.total_capacity_gb || 512} GB`,
-      `${f.evidence?.used_space_gb || 476} GB`,
-      `${f.evidence?.free_space_gb || 36} GB`,
-      `<span class="text-red font-mono"><b>${f.evidence?.utilization_pct || 93}%</b></span>`,
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0)
+      f.evidence?.total_capacity_gb !== undefined && f.evidence?.total_capacity_gb !== null ? `${f.evidence.total_capacity_gb} GB` : "--",
+      f.evidence?.used_space_gb !== undefined && f.evidence?.used_space_gb !== null ? `${f.evidence.used_space_gb} GB` : "--",
+      f.evidence?.free_space_gb !== undefined && f.evidence?.free_space_gb !== null ? `${f.evidence.free_space_gb} GB` : "--",
+      f.evidence?.utilization_pct !== undefined && f.evidence?.utilization_pct !== null ? `<span class="text-red font-mono"><b>${f.evidence.utilization_pct}%</b></span>` : (f.measured_value || "--"),
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost)
     ]
   },
   "database_usage": {
-    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Database Tier", "CPU / DTU Utilization", "Storage Utilization", COST_COL_HEADER, "Est. Annual Savings"],
+    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Database Tier", "Recommended Tier", "CPU / DTU Utilization", "Storage Utilization", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
-      f.evidence?.environment || "Production",
-      f.evidence?.database_tier || "Standard S3",
-      f.measured_value || `Avg ${f.evidence?.avg_dtu_cpu_pct || 1.8}%`,
-      `${f.evidence?.storage_used_gb || 14} / ${f.evidence?.storage_allocated_gb || 250} GB`,
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
+      f.evidence?.environment || "--",
+      f.evidence?.database_tier || "--",
+      f.evidence?.proposed_tier || "--",
+      f.measured_value || (f.evidence?.avg_dtu_cpu_pct !== undefined && f.evidence?.avg_dtu_cpu_pct !== null ? `Avg ${f.evidence.avg_dtu_cpu_pct}%` : "--"),
+      (f.evidence?.storage_used_gb !== undefined && f.evidence?.storage_allocated_gb !== undefined) ? `${f.evidence.storage_used_gb} / ${f.evidence.storage_allocated_gb} GB` : "--",
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },
@@ -2345,14 +2352,15 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "database_allocated_usage": {
-    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Allocated Storage", "Used Storage", "Storage Utilization (%)", COST_COL_HEADER, "Est. Annual Savings"],
+    columns: ["Database Name", "Subscription", "Resource Group", "Environment", "Allocated Storage", "Used Storage", "Recommended Size", "Storage Utilization (%)", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
-      f.evidence?.environment || "Production",
+      f.evidence?.environment || "--",
       f.evidence?.allocated_storage_gb !== undefined ? `${f.evidence.allocated_storage_gb} GB` : "--",
       f.evidence?.used_storage_gb !== undefined ? `${f.evidence.used_storage_gb} GB` : "--",
+      f.evidence?.target_allocated_gb !== undefined && f.evidence?.target_allocated_gb !== null ? `${f.evidence.target_allocated_gb} GB` : "--",
       f.evidence?.utilization_pct !== undefined ? `${f.evidence.utilization_pct}%` : "--",
       formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
@@ -2388,16 +2396,17 @@ const COST_COLUMNS_SPEC = {
     ]
   },
   "function_apps": {
-    columns: ["Function App Name", "Subscription", "Resource Group", "Environment", "Hosting Plan", "Execution Count", "Average Execution Duration", COST_COL_HEADER, "Est. Annual Savings"],
+    columns: ["Function App Name", "Subscription", "Resource Group", "Environment", "Hosting Plan", "Recommended Plan", "Execution Count", "Average Execution Duration", COST_COL_HEADER, "Est. Annual Savings"],
     extractor: (f) => [
       f.resource_name,
       f.subscription_name || f.subscription_id,
       f.resource_group || "--",
       f.evidence?.environment || "--",
       f.evidence?.hosting_plan || "--",
-      f.evidence?.execution_count !== undefined ? `${f.evidence.execution_count} runs/mo` : "--",
-      f.evidence?.avg_duration_ms !== undefined ? `${f.evidence.avg_duration_ms} ms` : "--",
-      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost ?? 0),
+      "Consumption (Y1)",
+      f.evidence?.execution_count !== undefined && f.evidence?.execution_count !== null ? `${f.evidence.execution_count} runs/30d` : "--",
+      f.evidence?.avg_duration_ms !== undefined && f.evidence?.avg_duration_ms !== null ? `${f.evidence.avg_duration_ms} ms` : "--",
+      formatCurrency(f.evidence?.actual_cost_mtd ?? f.current_monthly_cost),
       `<span class="text-darkgreen font-mono"><b>${formatSavingsWithMonthly(f.estimated_annual_savings || 0, f.estimated_monthly_savings)}</b></span>`
     ]
   },

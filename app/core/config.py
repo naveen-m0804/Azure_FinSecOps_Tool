@@ -19,41 +19,12 @@ class Settings(BaseSettings):
     azure_max_retries: int = int(os.getenv("AZURE_MAX_RETRIES", "4"))
     
     # --------------------------------------------------------------------------
-    # Genuine Dynamic Agentic AI Engine (Universal Multi-Provider Support)
-    # Supported AI_PROVIDER values: groq | nemotron | openai | gemini | claude | azure_openai
+    # Google Cloud Vertex AI Agentic Engine
     # --------------------------------------------------------------------------
-    ai_provider: str = os.getenv("AI_PROVIDER", "groq")
-
-    # NVIDIA Nemotron Configuration
-    nemotron_api_key: str = os.getenv("NEMOTRON_API_KEY", os.getenv("NVIDIA_API_KEY", ""))
-    nemotron_model: str = os.getenv("NEMOTRON_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
-    nemotron_base_url: str = os.getenv("NEMOTRON_BASE_URL", os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"))
-
-    # Groq Cloud Configuration
-    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
-    groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    groq_base_url: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-
-    # OpenAI (ChatGPT) Configuration
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o")
-    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-
-    # Google Gemini Configuration (Official OpenAI-compatible endpoint)
-    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
-    gemini_base_url: str = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
-
-    # Anthropic Claude Configuration
-    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    claude_model: str = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
-    anthropic_base_url: str = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
-
-    # Azure OpenAI Service Configuration
-    azure_openai_api_key: str = os.getenv("AZURE_OPENAI_API_KEY", "")
-    azure_openai_endpoint: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
-    azure_openai_deployment_name: str = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "")
-    azure_openai_api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
+    vertex_ai_api_key: str = os.getenv("VERTEX_AI_API_KEY", "")
+    vertex_ai_model: str = os.getenv("VERTEX_AI_MODEL", "gemini-2.5-flash")
+    vertex_ai_project: str = os.getenv("VERTEX_AI_PROJECT", "")
+    vertex_ai_location: str = os.getenv("VERTEX_AI_LOCATION", "global")
 
     # Engine Execution Constraints
     ai_max_tokens: int = int(os.getenv("AI_MAX_TOKENS", "4096"))

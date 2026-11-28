@@ -10,7 +10,7 @@ from app.azure.pricing import PricingEngine
 from app.azure.cost_management import CostManagementAdapter
 from app.utils.dates import get_observation_window
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.environment import resolve_environment, matches_target_tags
 
 
 def _extract_metric_value(metrics: Dict[str, float], *names: str) -> float:
@@ -279,6 +279,9 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
                     disk_tags = vm_tags
                     region = vm_location
 
+                if not matches_target_tags(disk_tags, context.target_tags):
+                    continue
+
                 disk_tier_str = _get_friendly_disk_tier(curr_sku, size_gb, azure_tier)
                 provisioned_iops = _get_provisioned_iops(curr_sku, size_gb, azure_iops)
 
@@ -295,8 +298,6 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
 
                 # Flag underutilized IOPS (< 5%) on non-Standard disks
                 if iops_utilization < 5.0 and not _is_standard_hdd(curr_sku):
-                    curr_cost, proposed_sku, proposed_cost = PricingEngine.get_disk_downgrade_savings(curr_sku, size_gb)
-                    monthly_saving = max(0.0, curr_cost - proposed_cost)
                     parsed = parse_azure_resource_id(disk_id or vm_id)
                     rg_name = parsed.get("resource_group") or "Unknown"
 
@@ -304,8 +305,19 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
                     actual_cost = cost_info.get("cost")
                     currency = cost_info.get("currency", context.currency)
 
-                    final_cost = actual_cost if actual_cost is not None and actual_cost > 0 else curr_cost
-                    monthly_saving = max(0.0, final_cost - proposed_cost)
+                    retail_curr_cost, proposed_sku, proposed_cost = await PricingEngine.get_disk_downgrade_pricing(
+                        curr_sku, size_gb, region, currency
+                    )
+                    final_cost = float(actual_cost) if (actual_cost is not None and actual_cost > 0) else retail_curr_cost
+                    if final_cost is not None and final_cost > 0 and retail_curr_cost and retail_curr_cost > 0 and proposed_cost is not None:
+                        tier_ratio = max(0.0, (retail_curr_cost - proposed_cost) / retail_curr_cost)
+                        monthly_saving = round(final_cost * tier_ratio, 2)
+                    elif final_cost is not None and proposed_cost is not None:
+                        monthly_saving = round(max(0.0, final_cost - proposed_cost), 2)
+                    else:
+                        monthly_saving = None
+                    annual_saving = round(monthly_saving * 12, 2) if monthly_saving is not None else None
+                    savings_pct = round((monthly_saving / final_cost) * 100.0, 2) if (monthly_saving is not None and final_cost and final_cost > 0) else None
 
                     env = resolve_environment(
                         tags=disk_tags,
@@ -352,20 +364,23 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
                                 "iops_utilization": f"{iops_utilization:.2f}%",
                                 "iops_utilization_percent": round(iops_utilization, 2),
                                 "environment": env,
-                                "actual_cost_mtd": round(final_cost, 2),
+                                "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
                                 "current_sku": curr_sku,
                                 "proposed_sku": proposed_sku,
+                                "recommended_tier": _get_friendly_disk_tier(proposed_sku, size_gb),
+                                "proposed_monthly_cost": round(proposed_cost, 2) if proposed_cost is not None else None,
+                                "savings_pct": savings_pct,
                                 "observation_window_days": 90,
                                 "cost_month": cost_month
                             },
-                            current_monthly_cost=round(final_cost, 2),
-                            estimated_monthly_savings=round(monthly_saving, 2),
-                            estimated_annual_savings=round(monthly_saving * 12, 2),
+                            current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
+                            estimated_monthly_savings=monthly_saving,
+                            estimated_annual_savings=annual_saving,
                             currency=currency,
-                            savings_type="Estimated Savings",
-                            confidence="High",
-                            calculation_method=f"Downgrading OS disk tier from {disk_tier_str} to {proposed_sku} based on 90-day <5% IOPS utilization",
-                            validation_required="Confirm disk latency requirements with application owners before resizing tier",
+                            savings_type="Estimated Savings" if monthly_saving is not None else "Not Estimated",
+                            confidence="High" if monthly_saving is not None else "Low",
+                            calculation_method="Monthly savings = current OS disk cost - proposed OS disk cost; savings % = savings/current cost; annual = monthly * 12",
+                            validation_required="Check OS requirements, performance and minimum disk size; avoid counting Disk Space Alert twice.",
                             collected_at=now_str
                         )
                     )
@@ -383,6 +398,9 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
 
                 # Only evaluate attached OS disks (osType is not None for OS disks)
                 if (disk_state == "Attached" or managed_by) and os_type is not None:
+                    disk_tags = disk.get("tags") or {}
+                    if not matches_target_tags(disk_tags, context.target_tags):
+                        continue
                     resources_evaluated += 1
                     processed_disk_ids.add(norm_d_id)
                     d_name = disk.get("name", "")
@@ -403,14 +421,13 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
                         context.client,
                         disk_id=disk.get("id", ""),
                         vm_id=vm_id_ref,
-                        start_iso=start_iso,
-                        end_iso=end_iso
+                        start_iso=start_iso_30,
+                        end_iso=end_iso_30
                     )
 
                     iops_utilization = (used_iops / provisioned_iops * 100.0) if provisioned_iops > 0 else 0.0
 
                     if iops_utilization < 5.0 and not _is_standard_hdd(curr_sku):
-                        curr_cost, proposed_sku, proposed_cost = PricingEngine.get_disk_downgrade_savings(curr_sku, size_gb)
                         parsed = parse_azure_resource_id(disk.get("id", ""))
                         rg_name = parsed.get("resource_group") or "Unknown"
 
@@ -418,8 +435,13 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
                         actual_cost = cost_info.get("cost")
                         currency = cost_info.get("currency", context.currency)
 
-                        final_cost = actual_cost if actual_cost is not None and actual_cost > 0 else curr_cost
-                        monthly_saving = max(0.0, final_cost - proposed_cost)
+                        retail_curr_cost, proposed_sku, proposed_cost = await PricingEngine.get_disk_downgrade_pricing(
+                            curr_sku, size_gb, region, currency
+                        )
+                        final_cost = float(actual_cost) if (actual_cost is not None and actual_cost > 0) else retail_curr_cost
+                        monthly_saving = round(max(0.0, final_cost - proposed_cost), 2) if (final_cost is not None and proposed_cost is not None) else None
+                        annual_saving = round(monthly_saving * 12, 2) if monthly_saving is not None else None
+                        savings_pct = round((monthly_saving / final_cost) * 100.0, 2) if (monthly_saving is not None and final_cost and final_cost > 0) else None
 
                         env = resolve_environment(
                             tags=disk_tags,
@@ -466,20 +488,22 @@ class UnderutilizedOsDisksAssessment(BaseAssessment):
                                     "iops_utilization": f"{iops_utilization:.2f}%",
                                     "iops_utilization_percent": round(iops_utilization, 2),
                                     "environment": env,
-                                    "actual_cost_mtd": round(final_cost, 2),
+                                    "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
                                     "current_sku": curr_sku,
                                     "proposed_sku": proposed_sku,
+                                    "proposed_monthly_cost": round(proposed_cost, 2) if proposed_cost is not None else None,
+                                    "savings_pct": savings_pct,
                                     "observation_window_days": 90,
                                     "cost_month": cost_month
                                 },
-                                current_monthly_cost=round(final_cost, 2),
-                                estimated_monthly_savings=round(monthly_saving, 2),
-                                estimated_annual_savings=round(monthly_saving * 12, 2),
+                                current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
+                                estimated_monthly_savings=monthly_saving,
+                                estimated_annual_savings=annual_saving,
                                 currency=currency,
-                                savings_type="Estimated Savings",
-                                confidence="High",
-                                calculation_method=f"Downgrading OS disk tier from {disk_tier_str} to {proposed_sku} based on 90-day <5% IOPS utilization",
-                                validation_required="Confirm disk latency requirements with application owners before resizing tier",
+                                savings_type="Estimated Savings" if monthly_saving is not None else "Not Estimated",
+                                confidence="High" if monthly_saving is not None else "Low",
+                                calculation_method="Monthly savings = current OS disk cost - proposed OS disk cost; savings % = savings/current cost; annual = monthly * 12",
+                                validation_required="Check OS requirements, performance and minimum disk size; avoid counting Disk Space Alert twice.",
                                 collected_at=now_str
                             )
                         )

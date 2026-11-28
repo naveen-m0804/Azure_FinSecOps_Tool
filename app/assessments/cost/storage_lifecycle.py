@@ -6,8 +6,9 @@ from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
 from app.azure.storage import StorageAdapter
 from app.azure.cost_management import CostManagementAdapter
+from app.azure.pricing import PricingEngine
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.environment import resolve_environment, matches_target_tags
 
 
 class StorageLifecycleAssessment(BaseAssessment):
@@ -60,6 +61,8 @@ class StorageLifecycleAssessment(BaseAssessment):
                 if sa_type and sa_type.lower() not in ("microsoft.storage/storageaccounts", "storageaccounts"):
                     continue
                 if sa_id and "/providers/" in sa_id.lower() and "/microsoft.storage/storageaccounts/" not in sa_id.lower():
+                    continue
+                if not matches_target_tags(sa.get("tags"), context.target_tags):
                     continue
 
                 resources_evaluated += 1
@@ -133,9 +136,23 @@ class StorageLifecycleAssessment(BaseAssessment):
                 )
 
                 actual_cost = round(cost_val, 2)
-                # Defensible FinOps savings: Transitioning aged blobs to Cool/Archive yields ~30% savings
-                est_monthly_saving = round(actual_cost * 0.30, 2) if actual_cost > 0 else 0.0
-                est_annual_saving = round(est_monthly_saving * 12, 2) if est_monthly_saving > 0 else 0.0
+                sa_region = sa.get("location", "")
+                # Formula (R13): Monthly savings = current total eligible storage cost - proposed tier/storage/transaction/retrieval cost
+                # Fetch real Hot vs Cool pricing from Azure Retail Prices API for this region & redundancy
+                est_monthly_saving: Optional[float] = None
+                est_annual_saving: Optional[float] = None
+                savings_pct: Optional[float] = None
+                tier_prices = await PricingEngine.get_storage_tier_unit_prices(sa_region, redundancy, currency)
+                if actual_cost > 0 and tier_prices and tier_prices.get("hot") and tier_prices.get("cool"):
+                    hot_p = tier_prices["hot"]
+                    cool_p = tier_prices["cool"]
+                    # Conservative eligible tiering ratio based on Hot -> Cool unit rate difference
+                    if hot_p > cool_p:
+                        tier_diff_ratio = (hot_p - cool_p) / hot_p
+                        # Account-level cost includes transactions/retrieval; apply to storage cost
+                        est_monthly_saving = round(actual_cost * tier_diff_ratio, 2)
+                        est_annual_saving = round(est_monthly_saving * 12, 2)
+                        savings_pct = round((est_monthly_saving / actual_cost) * 100.0, 2)
 
                 findings.append(
                     FindingModel(
@@ -173,18 +190,19 @@ class StorageLifecycleAssessment(BaseAssessment):
                             "is_lcm_configured": is_lcm_configured,
                             "has_active_rules": has_active_rules,
                             "actual_cost_mtd": actual_cost,
+                            "savings_pct": savings_pct,
                             "cost_month": cost_month,
                             "rule_names": policy_res.get("rule_names", ""),
                             "enabled_rule_names": policy_res.get("enabled_rule_names", "")
                         },
                         current_monthly_cost=actual_cost,
                         estimated_monthly_savings=est_monthly_saving,
-                        estimated_annual_savings=est_annual_saving if est_annual_saving > 0 else None,
+                        estimated_annual_savings=est_annual_saving,
                         currency=currency,
-                        savings_type="Scenario Savings",
-                        confidence="High" if actual_cost > 0 else "Medium",
-                        calculation_method="Estimated 30% storage savings from automated tiering of aged data from Hot to Cool/Archive",
-                        validation_required="Review application data access patterns before configuring lifecycle transitions",
+                        savings_type="Scenario Savings" if est_monthly_saving is not None else "Not Estimated",
+                        confidence="High" if est_monthly_saving is not None else "Low",
+                        calculation_method="Monthly savings = current total eligible storage cost - proposed tier/storage/transaction/retrieval cost (via Azure Retail Prices Hot vs Cool rates); annual = monthly * 12",
+                        validation_required="Pricing/volume and access pattern required; account-level cost alone may not be entirely tier-eligible; include early deletion/retrieval and transaction costs.",
                         collected_at=now_str
                     )
                 )

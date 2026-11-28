@@ -1,7 +1,7 @@
 import datetime
 import re
 import time
-from typing import List
+from typing import List, Optional
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
@@ -10,7 +10,7 @@ from app.azure.cost_management import CostManagementAdapter
 from app.azure.pricing import PricingEngine
 from app.utils.dates import get_current_month_to_date
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.environment import resolve_environment, matches_target_tags
 
 class AutoShutdownAssessment(BaseAssessment):
     assessment_id = "auto_shutdown"
@@ -69,24 +69,10 @@ class AutoShutdownAssessment(BaseAssessment):
                 parsed = parse_azure_resource_id(vm_id)
                 rg = parsed.get("resource_group") or ""
 
-                # Pure tag-based scoping: If target tags provided, match ONLY matching VMs.
-                # If target tags are empty, analyze ALL VMs lacking auto-shutdown schedules.
-                clean_target_tags = [str(tt).strip() for tt in (context.target_tags or context.test_tags or []) if str(tt).strip()]
-                if clean_target_tags:
-                    matched_vm = False
-                    for tt in clean_target_tags:
-                        tt_lower = tt.lower()
-                        for k, v in tags.items():
-                            if tt_lower == str(k).strip().lower() or tt_lower == str(v).strip().lower() or tt_lower in f"{k}={v}".lower():
-                                matched_vm = True
-                                break
-                        if not matched_vm and (tt_lower in rg.lower() or tt_lower in vm_name.lower()):
-                            matched_vm = True
-                            break
-                        if matched_vm:
-                            break
-                    if not matched_vm:
-                        continue
+                # Strict tag-based scoping: If user entered target_tags, match ONLY resources with matching tags.
+                # If no target_tags entered, evaluate ALL VMs (tagged or untagged).
+                if not matches_target_tags(tags, context.target_tags):
+                    continue
 
                 env_val = resolve_environment(tags, vm_name, rg, prod_tags=context.prod_tags, test_tags=context.test_tags, target_tags=context.target_tags)
 
@@ -123,44 +109,38 @@ class AutoShutdownAssessment(BaseAssessment):
                         power_state = "Running"
 
                 # Identify genuinely wasteful resources:
-                # Flag non-prod VMs where auto-shutdown is NOT enabled AND VM is running or incurs compute runtime
+                # Flag VMs where auto-shutdown is NOT enabled
                 if auto_shutdown_status != "Enabled":
-                    vm_size = props.get("hardwareProfile", {}).get("vmSize", "Standard_D2s_v5")
-                    rates = PricingEngine.get_vm_rates(vm_size)
+                    vm_size = props.get("hardwareProfile", {}).get("vmSize")
+                    vm_region = vm.get("location", "")
+                    os_type = props.get("storageProfile", {}).get("osDisk", {}).get("osType", "Linux")
 
-                    # AGGREGATE FULL COST OF VM AND ALL ATTACHED ASSETS (Disks, NICs, IPs)
-                    storage_prof = props.get("storageProfile", {})
-                    os_disk_id = storage_prof.get("osDisk", {}).get("managedDisk", {}).get("id")
-                    os_disk_cost = cost_map.get(normalize_resource_id(os_disk_id), {}).get("cost", 0.0) if os_disk_id else 0.0
-
-                    data_disks_cost = 0.0
-                    for dd in storage_prof.get("dataDisks", []):
-                        dd_id = dd.get("managedDisk", {}).get("id")
-                        if dd_id:
-                            data_disks_cost += cost_map.get(normalize_resource_id(dd_id), {}).get("cost", 0.0)
-
-                    network_prof = props.get("networkProfile", {})
-                    nics_cost = 0.0
-                    for nic in network_prof.get("networkInterfaces", []):
-                        nic_id = nic.get("id")
-                        if nic_id:
-                            nics_cost += cost_map.get(normalize_resource_id(nic_id), {}).get("cost", 0.0)
-
-                    vm_compute_cost = cost_map.get(norm_vm_id, {}).get("cost", 0.0)
-                    total_vm_cost = vm_compute_cost + os_disk_cost + data_disks_cost + nics_cost
-
-                    # Fallback if no billing data exists yet
-                    if total_vm_cost <= 0.0:
-                        total_vm_cost = rates.get("monthly", 70.08)
-
-                    # User formula: hourly rate = (last month cost / 710 hours)
-                    # Savings = hourly rate * off_hours (~360 off-hours per month)
-                    hourly_rate = total_vm_cost / 710.0
-                    monthly_compute_savings = round(hourly_rate * 360.0, 2)
-                    annual_savings = round(monthly_compute_savings * 12.0, 2)
-
+                    # Per Savings Formula Guide (R9):
+                    # Compute-only proxy; exclude disk, reserved-instance and other continuing charges.
                     cost_item = cost_map.get(norm_vm_id, {})
+                    actual_compute_cost = cost_item.get("cost")
                     currency = cost_item.get("currency", context.currency)
+
+                    vm_compute_cost: Optional[float] = None
+                    if actual_compute_cost is not None and actual_compute_cost > 0:
+                        vm_compute_cost = float(actual_compute_cost)
+                    elif vm_size:
+                        vm_rates = await PricingEngine.get_vm_rates(vm_size, vm_region, os_type=os_type, currency=currency)
+                        if vm_rates and vm_rates.get("monthly") is not None:
+                            vm_compute_cost = vm_rates["monthly"]
+
+                    # Formula (R9): Savings % = scheduled stoppable hours/year / 8760
+                    # Standard off-hours schedule: 12 hours/day (19:00-07:00) * 365 days = 4380 hours/year (or 2600 if weekday 10h*5d)
+                    stoppable_hours_year = 4380.0
+                    savings_ratio = stoppable_hours_year / 8760.0
+                    savings_pct = round(savings_ratio * 100.0, 2)
+
+                    monthly_compute_savings: Optional[float] = None
+                    annual_savings: Optional[float] = None
+                    if vm_compute_cost is not None and vm_compute_cost > 0:
+                        monthly_compute_savings = round(vm_compute_cost * savings_ratio, 2)
+                        annual_savings = round(monthly_compute_savings * 12.0, 2)
+
                     parsed = parse_azure_resource_id(vm_id)
 
                     findings.append(
@@ -174,13 +154,16 @@ class AutoShutdownAssessment(BaseAssessment):
                             resource_name=vm_name,
                             resource_type="Microsoft.Compute/virtualMachines",
                             resource_id=vm_id,
-                            region=vm.get("location", "global"),
+                            region=vm_region or "global",
                             severity="High" if auto_shutdown_status == "Not Configured" else "Medium",
                             status=f"Shutdown {auto_shutdown_status}",
-                            current_configuration=f"Environment: {env_val} | Auto-Shutdown: {auto_shutdown_status} | Size: {vm_size} | Power: {power_state}",
+                            current_configuration=f"Environment: {env_val} | Auto-Shutdown: {auto_shutdown_status} | Size: {vm_size or 'Unknown'} | Power: {power_state}",
                             measured_value=f"VM runs without active auto-shutdown schedule (State: {power_state})",
                             recommended_configuration="Enable automated daily auto-shutdown at 19:00 local time",
-                            recommendation=f"Non-production VM '{vm_name}' does not have an active auto-shutdown schedule. Total VM + assets monthly cost: ${total_vm_cost:,.2f}.",
+                            recommendation=(
+                                f"VM '{vm_name}' does not have an active auto-shutdown schedule."
+                                + (f" Eligible compute monthly cost: {currency} {vm_compute_cost:,.2f}." if vm_compute_cost is not None else "")
+                            ),
                             metric_period=f"Last Completed Month ({cost_month})",
                             data_source="Microsoft.DevTestLab/schedules API & Azure Cost Management",
                             evidence={
@@ -193,23 +176,20 @@ class AutoShutdownAssessment(BaseAssessment):
                                 "scheduled_shutdown_time": scheduled_time_display,
                                 "shutdown_time": sch_time,
                                 "timezone": sch_tz,
-                                "vm_compute_cost": round(vm_compute_cost, 2),
-                                "os_disk_cost": round(os_disk_cost, 2),
-                                "data_disks_cost": round(data_disks_cost, 2),
-                                "network_cost": round(nics_cost, 2),
-                                "total_vm_cost": round(total_vm_cost, 2),
-                                "hourly_rate": round(hourly_rate, 4),
-                                "actual_cost_mtd": round(total_vm_cost, 2),
+                                "vm_compute_cost": round(vm_compute_cost, 2) if vm_compute_cost is not None else None,
+                                "stoppable_hours_year": stoppable_hours_year,
+                                "savings_pct": savings_pct,
+                                "actual_cost_mtd": round(vm_compute_cost, 2) if vm_compute_cost is not None else None,
                                 "cost_month": cost_month
                             },
-                            current_monthly_cost=round(total_vm_cost, 2),
+                            current_monthly_cost=round(vm_compute_cost, 2) if vm_compute_cost is not None else None,
                             estimated_monthly_savings=monthly_compute_savings,
                             estimated_annual_savings=annual_savings,
                             currency=currency,
-                            savings_type="Estimated Savings",
-                            confidence="High",
-                            calculation_method=f"Total VM + attached assets cost (${total_vm_cost:,.2f}) / 710 hours * 360 off-hours",
-                            validation_required="Confirm developers do not require off-hours or overnight compute runtime",
+                            savings_type="Estimated Savings" if monthly_compute_savings is not None else "Not Estimated",
+                            confidence="High" if monthly_compute_savings is not None else "Low",
+                            calculation_method="Savings % = scheduled stoppable hours/year (4380) / 8760; monthly estimate = eligible compute cost * savings %; annual = monthly * 12 (compute-only proxy)",
+                            validation_required="Verify actual execution and exclude disk, reserved-instance and other continuing charges; may overlap Off-Hours Execution.",
                             collected_at=now_str
                         )
                     )

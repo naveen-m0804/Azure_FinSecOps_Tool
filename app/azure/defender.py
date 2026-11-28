@@ -1,8 +1,54 @@
+import html
+import re
 from typing import Dict, Any, List, Optional
 from app.azure.client_base import AzureClientBase
 
+
+def clean_html_text(raw: Any) -> str:
+    """Strips HTML tags/entities from Defender descriptions and remediation steps into clean readable text."""
+    if not raw:
+        return ""
+    text = str(raw)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln).strip()
+
+
 class DefenderAdapter:
     _metadata_cache: Dict[str, Dict[str, Any]] = {}
+    _control_map_cache: Dict[str, str] = {}
+
+    @classmethod
+    async def get_security_control_map(cls, client: AzureClientBase) -> Dict[str, str]:
+        """
+        Retrieves and caches the official mapping from Defender assessment metadata GUIDs
+        to their parent Security Control displayName via secureScoreControlDefinitions API.
+        """
+        if cls._control_map_cache:
+            return cls._control_map_cache
+        url: Optional[str] = "https://management.azure.com/providers/Microsoft.Security/secureScoreControlDefinitions?api-version=2020-01-01"
+        try:
+            while url:
+                resp = await client.execute_request("GET", url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data.get("value", []):
+                        props = item.get("properties", {}) or {}
+                        ctrl_name = (props.get("displayName") or item.get("name") or "").strip()
+                        if not ctrl_name:
+                            continue
+                        for adef in props.get("assessmentDefinitions", []) or []:
+                            aid = str(adef.get("id") or "").split("/")[-1].strip().lower()
+                            if aid:
+                                cls._control_map_cache[aid] = ctrl_name
+                    url = data.get("nextLink")
+                else:
+                    break
+        except Exception:
+            pass
+        return cls._control_map_cache
 
     @classmethod
     async def get_assessment_metadata(cls, client: AzureClientBase) -> Dict[str, Dict[str, Any]]:
@@ -34,37 +80,74 @@ class DefenderAdapter:
         return cls._metadata_cache
 
     @staticmethod
-    async def get_high_priority_assessments_via_arg(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
+    async def _query_arg_paginated(client: AzureClientBase, subscription_id: str, query: str) -> List[Dict[str, Any]]:
+        """Executes an Azure Resource Graph query with $skipToken pagination."""
+        results: List[Dict[str, Any]] = []
+        try:
+            arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+            skip_token: Optional[str] = None
+            while True:
+                options: Dict[str, Any] = {"resultFormat": "objectArray", "$top": 1000}
+                if skip_token:
+                    options["$skipToken"] = skip_token
+                arg_payload = {
+                    "subscriptions": [subscription_id],
+                    "query": query,
+                    "options": options,
+                }
+                resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
+                if resp.status_code != 200:
+                    break
+                payload = resp.json()
+                data = payload.get("data", [])
+                if isinstance(data, list):
+                    results.extend(data)
+                skip_token = payload.get("$skipToken")
+                if not skip_token or not data:
+                    break
+        except Exception:
+            pass
+        return results
+
+    @classmethod
+    async def get_security_assessments_via_arg(
+        cls,
+        client: AzureClientBase,
+        subscription_id: str,
+        unhealthy_only: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Retrieves Defender security assessments for a subscription via Azure Resource Graph."""
+        status_filter = (
+            "| where statusCode in~ ('Unhealthy', 'Open', 'ActionRequired', 'Active') "
+            if unhealthy_only else ""
+        )
+        query = (
+            f"securityresources "
+            f"| where subscriptionId =~ '{subscription_id}' "
+            f"| where type =~ 'microsoft.security/assessments' "
+            f"| extend statusCode = tostring(properties.status.code) "
+            f"{status_filter}"
+            f"| project id, name, type, subscriptionId, resourceGroup, properties"
+        )
+        return await cls._query_arg_paginated(client, subscription_id, query)
+
+    @classmethod
+    async def get_high_priority_assessments_via_arg(cls, client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
         """
         Retrieves High severity Defender recommendations directly via Azure Resource Graph.
         Matches official Azure Portal Defender for Cloud recommendations query filtered to High severity.
         """
-        try:
-            arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
-            arg_payload = {
-                "subscriptions": [subscription_id],
-                "query": (
-                    f"securityresources "
-                    f"| where subscriptionId =~ '{subscription_id}' "
-                    f"| where type =~ 'microsoft.security/assessments' "
-                    f"| extend statusCode = tostring(properties.status.code) "
-                    f"| where statusCode in~ ('Unhealthy', 'Open', 'ActionRequired', 'Active') "
-                    f"| extend severity = coalesce(tostring(properties.metadata.severity), tostring(properties.status.severity), tostring(properties.severity)) "
-                    f"| where severity =~ 'High' "
-                    f"| project id, name, type, subscriptionId, resourceGroup, properties"
-                ),
-                "options": {
-                    "resultFormat": "objectArray"
-                }
-            }
-            resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
-            if resp.status_code == 200:
-                data = resp.json().get("data", [])
-                if isinstance(data, list):
-                    return data
-        except Exception:
-            pass
-        return []
+        query = (
+            f"securityresources "
+            f"| where subscriptionId =~ '{subscription_id}' "
+            f"| where type =~ 'microsoft.security/assessments' "
+            f"| extend statusCode = tostring(properties.status.code) "
+            f"| where statusCode in~ ('Unhealthy', 'Open', 'ActionRequired', 'Active') "
+            f"| extend severity = coalesce(tostring(properties.metadata.severity), tostring(properties.status.severity), tostring(properties.severity)) "
+            f"| where severity =~ 'High' "
+            f"| project id, name, type, subscriptionId, resourceGroup, properties"
+        )
+        return await cls._query_arg_paginated(client, subscription_id, query)
 
     @staticmethod
     async def get_secure_score(client: AzureClientBase, subscription_id: str) -> Dict[str, Any]:

@@ -486,6 +486,9 @@ class ServiceRetirementAssessment(BaseAssessment):
             except Exception as ex:
                 logger.debug("Failed querying Defender retirement recommendations in sub %s: %s", sub.subscription_id, ex)
 
+        # Filter strictly to Approaching Retirement rows only
+        findings = [f for f in findings if f.status == "Approaching Retirement"]
+
         status = AssessmentStatus.COMPLETED if findings else AssessmentStatus.NO_FINDINGS
         return AssessmentResult(
             assessment_id=self.assessment_id,

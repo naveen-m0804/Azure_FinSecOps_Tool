@@ -84,9 +84,8 @@ class TlsVersionAssessment(BaseAssessment):
                                     "required": "TLS 1.2",
                                     "tls_status": "Insecure TLS Configured",
                                     "security_control": "Enforce secure TLS version",
-                                    "potential_score_increase": "+2.0%",
                                 },
-                                security_score_impact=2.0,
+                                security_score_impact=None,
                                 collected_at=now_str
                             )
                         )
@@ -142,9 +141,8 @@ class TlsVersionAssessment(BaseAssessment):
                                     "required": "TLS 1.2",
                                     "tls_status": "Insecure TLS Configured",
                                     "security_control": "Enforce secure TLS version",
-                                    "potential_score_increase": "+2.0%",
                                 },
-                                security_score_impact=2.0,
+                                security_score_impact=None,
                                 collected_at=now_str
                             )
                         )
@@ -195,9 +193,8 @@ class TlsVersionAssessment(BaseAssessment):
                                     "required": "TLS 1.2",
                                     "tls_status": "Insecure TLS Configured",
                                     "security_control": "Enforce secure TLS version",
-                                    "potential_score_increase": "+3.0%",
                                 },
-                                security_score_impact=3.0,
+                                security_score_impact=None,
                                 collected_at=now_str
                             )
                         )
@@ -248,9 +245,8 @@ class TlsVersionAssessment(BaseAssessment):
                                     "required": "TLS 1.2",
                                     "tls_status": "Insecure TLS Configured",
                                     "security_control": "Enforce secure TLS version",
-                                    "potential_score_increase": "+2.0%",
                                 },
-                                security_score_impact=2.0,
+                                security_score_impact=None,
                                 collected_at=now_str
                             )
                         )
@@ -301,9 +297,8 @@ class TlsVersionAssessment(BaseAssessment):
                                     "required": "TLS 1.2",
                                     "tls_status": "Insecure TLS Configured",
                                     "security_control": "Enforce secure TLS version",
-                                    "potential_score_increase": "+2.0%",
                                 },
-                                security_score_impact=2.0,
+                                security_score_impact=None,
                                 collected_at=now_str
                             )
                         )
@@ -370,7 +365,6 @@ class TlsVersionAssessment(BaseAssessment):
                 logger.debug("Defender TLS recommendations scan in sub %s: %s", sub.subscription_id, ex)
 
         status = AssessmentStatus.COMPLETED if findings else AssessmentStatus.NO_FINDINGS
-        total_score_impact = round(sum(f.security_score_impact for f in findings if f.security_score_impact), 1) if findings else None
 
         return AssessmentResult(
             assessment_id=self.assessment_id,
@@ -381,7 +375,7 @@ class TlsVersionAssessment(BaseAssessment):
             findings_count=len(findings),
             findings=findings,
             errors=errors,
-            security_score_improvement=total_score_impact,
+            security_score_improvement=None,
             execution_time_seconds=round(time.time() - start_t, 2),
             last_run_time=now_str
         )

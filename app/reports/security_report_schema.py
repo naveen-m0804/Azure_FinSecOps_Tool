@@ -34,7 +34,7 @@ SECURITY_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
         ]
     },
 
-    # 2. New Security Recommendations
+    # 2. New Security Recommendations (No Potential Score Increase)
     "new_recommendations": {
         "code": "SEC-02",
         "report_title": "New Azure Security Recommendations",
@@ -50,9 +50,8 @@ SECURITY_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Description",
             "Azure Remediation Recommendation",
             "Related Security Control",
-            "Potential Score Increase",
         ],
-        "col_widths": [85, 75, 75, 75, 85, 45, 55, 60, 90, 95, 50, 37],  # Total = 727 -> 752 pt
+        "col_widths": [85, 75, 75, 75, 90, 48, 58, 62, 95, 99, 60],  # Total = 752 pt
         "extractor": lambda f: [
             f.subscription_name,
             f.resource_group or "--",
@@ -65,9 +64,6 @@ SECURITY_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.evidence.get("description") or f.current_configuration or "--",
             f.recommendation or "--",
             f.evidence.get("security_control") or "--",
-            f"+{f.security_score_impact:.1f}%" if f.security_score_impact else (
-                f.evidence.get("potential_score_increase") if f.evidence.get("potential_score_increase") and f.evidence.get("potential_score_increase") != "--" else "--"
-            ),
         ]
     },
 
@@ -297,29 +293,35 @@ SECURITY_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
         "columns": [
             "Subscription Name",
             "Resource Group Name",
-            "Virtual Machine Name",
-            "Region",
+            "Resource Name",
+            "Resource Type",
+            "Recommendation Name",
+            "Severity",
+            "Status",
+            "First Detected Date",
             "Software Name",
-            "Publisher",
             "Installed Version",
-            "Latest Verified Version",
-            "Support Status",
-            "End-of-Support Date",
-            "Vulnerability Severity",
+            "Latest / Fix Version",
+            "Description",
+            "Azure Remediation Recommendation",
+            "Related Security Control",
         ],
-        "col_widths": [85, 75, 75, 55, 75, 75, 65, 65, 60, 60, 62],
+        "col_widths": [62, 55, 55, 50, 68, 40, 46, 50, 50, 52, 50, 62, 62, 50],  # Total = 752 pt
         "extractor": lambda f: [
             f.subscription_name,
             f.resource_group or "--",
             f.resource_name,
-            f.region or "global",
+            _clean_resource_type(f.resource_type),
+            f.evidence.get("recommendation_name") or f.evidence.get("software") or "--",
+            f.severity,
+            f.status or "Update Required",
+            f.evidence.get("first_detected_date") or "--",
             f.evidence.get("software") or f.evidence.get("software_name") or "--",
-            f.evidence.get("publisher") or "--",
             f.evidence.get("installed_version") or f.current_configuration or "--",
             f.evidence.get("recommended_version") or f.evidence.get("latest_version") or "--",
-            f.status or "Outdated",
-            f.evidence.get("end_of_support_date") or "--",
-            f.severity,
+            f.evidence.get("description") or f.current_configuration or "--",
+            f.evidence.get("remediation") or f.recommendation or "--",
+            f.evidence.get("security_control") or "--",
         ]
     },
 
@@ -366,7 +368,7 @@ SECURITY_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
         ]
     },
 
-    # 12. TLS Version
+    # 12. TLS Version (No Potential Score Increase)
     "tls_version": {
         "code": "SEC-12",
         "report_title": "Azure Services Using Insecure TLS Configurations",
@@ -382,10 +384,9 @@ SECURITY_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             "Required TLS Version",
             "TLS Configuration Status",
             "Related Security Control",
-            "Potential Score Increase",
             "Azure Remediation Recommendation",
         ],
-        "col_widths": [75, 65, 70, 70, 50, 60, 50, 50, 50, 55, 55, 35, 67],
+        "col_widths": [75, 65, 70, 70, 50, 65, 55, 55, 55, 60, 60, 72],  # Total = 752 pt
         "extractor": lambda f: [
             f.subscription_name,
             f.resource_group or "--",
@@ -398,7 +399,6 @@ SECURITY_REPORT_SPECS: Dict[str, Dict[str, Any]] = {
             f.evidence.get("required") or "TLS 1.2",
             f.status or "Legacy TLS Allowed",
             f.evidence.get("security_control") or "Enforce secure TLS version",
-            f"+{f.security_score_impact:.1f}%" if f.security_score_impact else "--",
             f.recommendation or "--",
         ]
     },

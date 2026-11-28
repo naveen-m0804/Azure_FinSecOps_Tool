@@ -10,7 +10,7 @@ from app.reports.pdf.styles import (
     COLOR_PRIMARY_RED, COLOR_LIGHT_BG, COLOR_BORDER, COLOR_WHITE, COLOR_DARK
 )
 from app.assessments.registry import assessment_registry
-from app.reports.cost_report_schema import COST_REPORT_SPECS, extract_cost_finding_row
+from app.reports.cost_report_schema import COST_REPORT_SPECS, extract_cost_finding_row, get_currency_symbol
 
 def escape_xml(val: Any) -> str:
     if val is None:
@@ -52,7 +52,7 @@ def generate_cost_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_id: 
 
     summary = job_data.get("summary", {})
     currency = summary.get("currency", "USD")
-    curr_symbol = "$" if not currency or currency == "USD" else f"{currency} "
+    curr_symbol = get_currency_symbol(currency)
     tot_monthly = summary.get("total_monthly_savings", 0.0)
     tot_annual = summary.get("total_annual_savings", 0.0)
     cost_findings_count = summary.get("cost_findings_count", 0)

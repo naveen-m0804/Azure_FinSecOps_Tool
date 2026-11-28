@@ -2,31 +2,41 @@ import datetime
 import time
 import logging
 import re
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
 from app.azure.compute import ComputeAdapter
+from app.azure.database import DatabaseAdapter
 from app.azure.defender import DefenderAdapter
 from app.azure.resources import ResourcesAdapter
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
 
 logger = logging.getLogger("azure_finsecops.assessments.vm_os_version")
 
-# Dynamic date extraction patterns from live Azure API responses
 DATE_REGEX_PATTERNS = [
     re.compile(r'\b\d{4}-\d{2}-\d{2}\b'),
     re.compile(r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b', re.IGNORECASE),
     re.compile(r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b', re.IGNORECASE),
 ]
 
-def resolve_os_build(instance_view: Dict[str, Any], image_ref: Dict[str, Any], guest_os_name: str, sku: str) -> str:
+
+def extract_date_from_text(text: str) -> Optional[str]:
+    """Extracts the first recognizable date string from Azure advisory text."""
+    if not text:
+        return None
+    for pat in DATE_REGEX_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def resolve_os_build(instance_view: Dict[str, Any], image_ref: Dict[str, Any], guest_os_name: str, sku: str, offer: str = "") -> str:
     """
     Dynamically extracts or maps the real OS build number for Windows and Linux VMs.
-    Handles instanceView osVersion (e.g., '10.0.20348.2655' -> '20348'),
-    imageReference exactVersion ('20348.2655.240905' -> '20348'), and known OS SKUs.
+    Handles instanceView osVersion, imageReference exactVersion, SQL VM offers (sql2019-ws2019), and known OS SKUs.
     """
-    # 1. Check instanceView.osVersion
     os_version = str(instance_view.get("osVersion") or "").strip()
     if os_version and os_version.lower() not in ("--", "latest", "unknown"):
         m = re.search(r'\b(2[0-9]{4}|1[0-9]{4}|9600|9200|760[0-1])(?:\.\d+)?\b', os_version)
@@ -35,17 +45,15 @@ def resolve_os_build(instance_view: Dict[str, Any], image_ref: Dict[str, Any], g
         if re.search(r'\d+\.\d+', os_version):
             return os_version
 
-    # 2. Check exactVersion in imageReference
     exact_ver = str(image_ref.get("exactVersion") or image_ref.get("version") or "").strip()
     if exact_ver and exact_ver.lower() not in ("--", "latest", "unknown"):
         m = re.search(r'\b(2[0-9]{4}|1[0-9]{4}|9600|9200|760[0-1])(?:\.\d+)?\b', exact_ver)
         if m:
             return m.group(0)
-        if re.search(r'\d+\.\d+', exact_ver):
+        if re.search(r'\d+\.\d+', exact_ver) and not offer.lower().startswith("sql"):
             return exact_ver
 
-    # 3. Derive standard OS build from known SKU / OS Name
-    combined = f"{guest_os_name} {sku}".lower()
+    combined = f"{guest_os_name} {sku} {offer}".lower()
     if "2025" in combined:
         return "26100"
     if "2022" in combined:
@@ -73,22 +81,25 @@ def resolve_os_build(instance_view: Dict[str, Any], image_ref: Dict[str, Any], g
 
     return "--"
 
+
 class VmOsVersionAssessment(BaseAssessment):
     assessment_id = "vm_os_version"
     code = "SEC-08"
     category = "security"
     name = "OS Version per VM"
-    description = "Audit operating system images and versions across virtual machines to flag unsupported or end-of-life platforms."
-    purpose = "Ensure compliance with operating system support lifecycle and mitigate risks from unpatchable legacy OS installations."
+    description = "Audit operating system images and SQL DB-based VM versions across virtual machines to flag unsupported or end-of-life platforms."
+    purpose = "Ensure compliance with operating system and SQL Server support lifecycle and mitigate risks from unpatchable legacy installations."
     required_permissions = [
         "Microsoft.Compute/virtualMachines/read",
         "Microsoft.Compute/virtualMachines/instanceView/read",
+        "Microsoft.SqlVirtualMachine/sqlVirtualMachines/read",
         "Microsoft.Security/assessments/read",
         "Microsoft.Advisor/recommendations/read",
         "Reader"
     ]
     required_data_sources = [
         "Microsoft.Compute VirtualMachines API (2023-09-01)",
+        "Microsoft.SqlVirtualMachine API (2022-02-01)",
         "Microsoft Defender for Cloud Assessments API (2021-06-01)",
         "Microsoft Advisor Recommendations API (2020-01-01)"
     ]
@@ -102,7 +113,7 @@ class VmOsVersionAssessment(BaseAssessment):
         resources_evaluated = 0
 
         for sub in context.subscriptions:
-            # Step 1: Query Microsoft Defender for Cloud for OS lifecycle and vulnerability assessments
+            # Step 1: Query Microsoft Defender for Cloud for OS lifecycle assessments
             defender_os_alerts: Dict[str, Dict[str, Any]] = {}
             try:
                 def_resp = await DefenderAdapter.get_security_assessments(context.client, sub.subscription_id, max_items=250)
@@ -159,6 +170,18 @@ class VmOsVersionAssessment(BaseAssessment):
             except Exception as ex:
                 logger.debug("Failed querying Azure Advisor OS recommendations in sub %s: %s", sub.subscription_id, ex)
 
+            # Step 2b: Query Azure SQL Virtual Machines to capture SQL DB-based VM versions
+            sql_vm_map: Dict[str, Dict[str, Any]] = {}
+            try:
+                sql_vms = await DatabaseAdapter.get_sql_virtual_machines(context.client, sub.subscription_id)
+                for svm in sql_vms:
+                    s_props = svm.get("properties", {}) or {}
+                    vm_res_id = s_props.get("virtualMachineResourceId") or ""
+                    if vm_res_id:
+                        sql_vm_map[normalize_resource_id(vm_res_id)] = s_props
+            except Exception as ex:
+                logger.debug("Failed querying SQL Virtual Machines in sub %s: %s", sub.subscription_id, ex)
+
             # Step 3: Scan all Virtual Machines with live instance view telemetry
             vms = await ComputeAdapter.get_vms(context.client, sub.subscription_id, expand_instance_view=True)
             for vm in vms:
@@ -171,20 +194,36 @@ class VmOsVersionAssessment(BaseAssessment):
                 storage_profile = props.get("storageProfile", {}) or {}
                 image_ref = storage_profile.get("imageReference", {}) or {}
                 os_disk = storage_profile.get("osDisk", {}) or {}
-                os_type = os_disk.get("osType") or ("Windows" if "win" in str(image_ref).lower() else "Linux")
+                os_type = os_disk.get("osType") or ("Windows" if ("win" in str(image_ref).lower() or "ws20" in str(image_ref).lower()) else "Linux")
 
                 publisher = image_ref.get("publisher", "Custom / Marketplace")
                 offer = image_ref.get("offer", "")
                 sku = image_ref.get("sku", "")
-                image_ver = image_ref.get("version") or image_ref.get("exactVersion") or "Marketplace Image"
+                image_ver = image_ref.get("exactVersion") or image_ref.get("version") or "Marketplace Image"
 
                 instance_view = props.get("instanceView", {}) or {}
                 guest_os_name = instance_view.get("osName") or f"{publisher} {offer} {sku}".strip()
                 guest_os_version = instance_view.get("osVersion") or sku or image_ver
 
-                os_build = resolve_os_build(instance_view, image_ref, guest_os_name, sku)
+                os_build = resolve_os_build(instance_view, image_ref, guest_os_name, sku, offer)
 
-                combined_check = f"{guest_os_name} {sku} {offer} {image_ver}".lower()
+                # Detect SQL DB version if VM is a SQL Server VM (either from SqlVirtualMachine API or imageReference)
+                sql_info = sql_vm_map.get(norm_vm_id, {})
+                sql_offer = str(sql_info.get("sqlImageOffer") or offer or "").strip()
+                sql_sku = str(sql_info.get("sqlImageSku") or sku or "").strip()
+                sql_version = "--"
+                sql_match = re.search(r'sql(\d{4})(?:[-_]ws(\d{4}))?', sql_offer.lower())
+                if sql_match:
+                    sql_yr = sql_match.group(1)
+                    ws_yr = sql_match.group(2)
+                    edition = sql_sku.capitalize() if sql_sku else ""
+                    ver_detail = f"{edition} ({image_ver})" if (edition and image_ver and image_ver != "latest") else (edition or image_ver)
+                    sql_version = f"SQL Server {sql_yr} {ver_detail}".strip()
+                    if ws_yr and "windows" not in guest_os_name.lower():
+                        guest_os_name = f"Windows Server {ws_yr} ({sql_offer})"
+                        guest_os_version = f"Windows Server {ws_yr} | {sql_version}"
+
+                combined_check = f"{guest_os_name} {sku} {offer} {sql_offer} {image_ver}".lower()
                 is_outdated = False
                 matched_os = guest_os_name
                 matched_status = "Unsupported OS"
@@ -216,18 +255,24 @@ class VmOsVersionAssessment(BaseAssessment):
                 BASELINE_OS_YEAR = 2025
 
                 if not is_outdated:
-                    # Windows Server dynamic generation check
-                    if "windows" in combined_check:
-                        win_year_match = re.search(r'\b(19\d{2}|20\d{2})\b', combined_check)
+                    # Windows Server (including SQL-on-Windows offers like sql2019-ws2019)
+                    win_ws_match = re.search(r'(?:windows.*?|\bws)(19\d{2}|20\d{2})\b', combined_check)
+                    if "windows" in combined_check or win_ws_match:
+                        win_year_match = win_ws_match or re.search(r'\b(19\d{2}|20\d{2})\b', combined_check)
                         if win_year_match:
                             win_year = int(win_year_match.group(1))
-                            is_r2 = "r2" in combined_check or "-r2" in combined_check
+                            is_r2 = bool(re.search(r'(?:\b|[-_])r2\b', combined_check))
                             display_win = f"Windows Server {win_year}{' R2' if is_r2 else ''}"
-                            matched_os = display_win
+                            matched_os = f"{display_win} ({sql_version})" if sql_version != "--" else display_win
+                            if sql_version != "--":
+                                guest_os_version = f"{display_win} | {sql_version}"
+                            elif not instance_view.get("osVersion"):
+                                guest_os_version = f"{display_win} ({sku})" if sku else display_win
+
                             if win_year < BASELINE_OS_YEAR:
                                 is_outdated = True
                                 matched_status = f"Outdated OS (< {BASELINE_OS_YEAR})"
-                                rec_text = f"Virtual machine '{vm_name}' runs {display_win} (version {win_year} < {BASELINE_OS_YEAR}). Upgrade VM guest operating system to Windows Server 2025 or newer."
+                                rec_text = f"Virtual machine '{vm_name}' runs {matched_os} (version {win_year} < {BASELINE_OS_YEAR}). Upgrade VM guest operating system to Windows Server 2025 or newer."
                                 rec_config = "Upgrade operating system to version 2025 or newer"
                             else:
                                 matched_status = "Actively Supported"
@@ -323,14 +368,14 @@ class VmOsVersionAssessment(BaseAssessment):
                             "os_type": os_type,
                             "os_version": guest_os_version,
                             "os_build": os_build,
+                            "sql_version": sql_version,
                             "publisher": publisher,
                             "image_version": image_ver,
                             "support_status": matched_status,
                             "end_of_support_date": dyn_date,
                             "security_control": "Maintain supported operating system release",
-                            "potential_score_increase": "+2.0%" if is_outdated else "--",
                         },
-                        security_score_impact=2.0 if is_outdated else 0.0,
+                        security_score_impact=None,
                         collected_at=now_str
                     )
                 )
@@ -345,6 +390,7 @@ class VmOsVersionAssessment(BaseAssessment):
             findings_count=len(findings),
             findings=findings,
             errors=errors,
+            security_score_improvement=None,
             execution_time_seconds=round(time.time() - start_t, 2),
             last_run_time=now_str
         )

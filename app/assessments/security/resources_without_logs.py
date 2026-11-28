@@ -1,4 +1,5 @@
 import datetime
+import re
 import time
 from typing import List, Dict, Any, Optional
 from app.assessments.base import BaseAssessment, AssessmentContext
@@ -97,37 +98,36 @@ class ResourcesWithoutLogsAssessment(BaseAssessment):
     ]
     required_data_sources = ["Azure Monitor Diagnostic Settings API (2021-05-01-preview)"]
 
-    def _matches_target_tags(self, resource: Dict[str, Any], sub_name: str, target_tags: List[str], prod_tags: List[str]) -> bool:
+    _PROD_TAG_PATTERN = re.compile(
+        r'(?<![a-z0-9])(?:prod|production|prd)(?![a-z0-9])',
+        re.IGNORECASE,
+    )
+    _NON_PROD_PREFIX_PATTERN = re.compile(
+        r'\b(?:non[-_]?prod(?:uction)?|pre[-_]?prod(?:uction)?)\b',
+        re.IGNORECASE,
+    )
+
+    def _is_production_tagged(self, resource: Dict[str, Any]) -> bool:
+        """
+        Embedded production-only tag filter for Resources Missing Diagnostic Logs.
+        Ignores user-supplied target_tags/prod_tags and matches all case combinations
+        of production tags (prod, production, prd) while excluding non-prod/pre-prod.
+        """
         tags = resource.get("tags") or {}
-        res_name = str(resource.get("name") or "").strip()
-        res_id = str(resource.get("id") or "").strip()
-        parsed = parse_azure_resource_id(res_id)
-        rg_name = str(parsed.get("resource_group") or "").strip()
+        if not isinstance(tags, dict) or not tags:
+            return False
 
-        # Pure tag-based scoping: If NO tags configured, evaluate all in target services
-        clean_target_tags = [str(tt).strip() for tt in (target_tags or []) if str(tt).strip()]
-        if not clean_target_tags:
-            return True
-
-        for tt in clean_target_tags:
-            tt_lower = tt.lower()
-            for k, v in tags.items():
-                if k is None:
+        for k, v in tags.items():
+            for part in (k, v):
+                if part is None:
                     continue
-                k_str = str(k).strip()
-                v_str = str(v).strip() if v is not None else ""
-                tag_pair = f"{k_str}={v_str}".lower()
-                if (
-                    tt_lower == k_str.lower()
-                    or tt_lower == v_str.lower()
-                    or tt_lower == tag_pair
-                    or tt_lower in tag_pair
-                ):
+                text = str(part).strip()
+                if not text:
+                    continue
+                if self._NON_PROD_PREFIX_PATTERN.search(text):
+                    continue
+                if self._PROD_TAG_PATTERN.search(text):
                     return True
-
-            if tt_lower in rg_name.lower() or tt_lower in res_name.lower():
-                return True
-
         return False
 
     async def run(self, context: AssessmentContext) -> AssessmentResult:
@@ -153,7 +153,7 @@ class ResourcesWithoutLogsAssessment(BaseAssessment):
                 if not service_info:
                     continue
 
-                if not self._matches_target_tags(res, sub.display_name, context.target_tags, context.prod_tags):
+                if not self._is_production_tagged(res):
                     continue
 
                 resources_evaluated += 1
@@ -162,9 +162,7 @@ class ResourcesWithoutLogsAssessment(BaseAssessment):
                 res_location = res.get("location", "global")
                 parsed = parse_azure_resource_id(res_id)
                 rg_name = parsed.get("resource_group") or "Unknown"
-                env_label = resolve_environment(res.get("tags"), res_name, rg_name, prod_tags=context.prod_tags, test_tags=context.target_tags)
-                if env_label == "Unassigned" and context.target_tags:
-                    env_label = context.target_tags[0]
+                env_label = "Production"
 
                 # Fetch live diagnostic settings from Azure Monitor
                 diag_settings = await MonitorAdapter.get_diagnostic_settings(context.client, res_id)

@@ -1,22 +1,14 @@
 import datetime
 import time
-from typing import List
+from typing import List, Optional
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
 from app.azure.storage import StorageAdapter
 from app.azure.cost_management import CostManagementAdapter
-from app.utils.dates import get_current_month_to_date
+from app.azure.pricing import PricingEngine
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
-
-REDUNDANCY_SAVINGS_MAP = {
-    "ZRS": 0.22,
-    "GRS": 0.50,
-    "RA-GRS": 0.55,
-    "GZRS": 0.60,
-    "RA-GZRS": 0.65,
-}
+from app.utils.environment import resolve_environment, matches_target_tags
 
 class NonLrsStorageRedundancyAssessment(BaseAssessment):
     assessment_id = "non_lrs_storage_redundancy"
@@ -65,40 +57,11 @@ class NonLrsStorageRedundancyAssessment(BaseAssessment):
                 parsed = parse_azure_resource_id(sa_id)
                 sa_rg = parsed.get("resource_group") or ""
 
-                # Evaluate based on user-provided tags if supplied; otherwise evaluate all non-LRS accounts
-                matched_target = False
-                tag_matched_label = ""
-
-                user_tags = [t.strip() for t in (context.target_tags or []) if t.strip()]
-                test_tags = [t.strip() for t in (context.test_tags or []) if t.strip()]
-                active_filter_tags = user_tags or test_tags
-
-                if active_filter_tags:
-                    # User-provided tags take precedence - evaluate accounts matching tags
-                    for ut in active_filter_tags:
-                        ut_lower = ut.lower()
-                        # Check tag keys and values
-                        for k, v in tags.items():
-                            k_str = str(k).strip()
-                            v_str = str(v).strip()
-                            if ut_lower == k_str.lower() or ut_lower == v_str.lower() or ut_lower in f"{k_str}={v_str}".lower():
-                                matched_target = True
-                                tag_matched_label = f"Tag: {k}={v}"
-                                break
-                        if not matched_target and (ut_lower in sa_rg.lower() or ut_lower in sa_name.lower()):
-                            matched_target = True
-                            tag_matched_label = f"Match: {ut}"
-                            break
-                        if matched_target:
-                            break
-                    if not matched_target:
-                        continue
-                else:
-                    # Pure tag-based scoping: If NO tags configured, analyze ALL non-LRS storage accounts
-                    matched_target = True
-                    tag_matched_label = resolve_environment(tags, sa_name, sa_rg, prod_tags=context.prod_tags, test_tags=context.test_tags, target_tags=context.target_tags)
-
-                env_val = tag_matched_label or "Target Scope"
+                # Strict tag-based scoping: If user entered target_tags, evaluate ONLY resources with matching tags.
+                # If no target_tags entered, evaluate ALL non-LRS storage accounts (tagged or untagged).
+                if not matches_target_tags(tags, context.target_tags):
+                    continue
+                env_val = resolve_environment(tags, sa_name, sa_rg, prod_tags=context.prod_tags, test_tags=context.test_tags, target_tags=context.target_tags)
 
                 # Check Redundancy SKU
                 sku = sa.get("sku")
@@ -122,19 +85,30 @@ class NonLrsStorageRedundancyAssessment(BaseAssessment):
                 if current_redundancy == "LRS":
                     continue
 
-                # Non-LRS redundancy in test environment detected!
+                # Non-LRS redundancy detected!
                 norm_id = normalize_resource_id(sa_id)
                 cost_item = cost_map.get(norm_id, {})
-                cost_val = cost_item.get("cost", 0.0)
+                cost_val = float(cost_item.get("cost", 0.0))
                 currency = cost_item.get("currency", context.currency)
+                sa_region = sa.get("location", "")
 
-                # Granular, defensible savings calculation based on exact SKU tier
-                savings_pct = REDUNDANCY_SAVINGS_MAP.get(
-                    current_redundancy,
-                    0.50 if "GRS" in current_redundancy else 0.22
-                )
-                est_monthly_saving = round(cost_val * savings_pct, 2) if cost_val > 0 else 0.0
-                est_annual_saving = round(est_monthly_saving * 12, 2) if est_monthly_saving > 0 else None
+                # Formula (R19): Monthly savings = current eligible redundancy cost - proposed LRS cost
+                # Fetch real regional redundancy vs LRS unit prices from Azure Retail Prices API
+                est_monthly_saving: Optional[float] = None
+                est_annual_saving: Optional[float] = None
+                savings_pct: Optional[float] = None
+                proposed_lrs_cost: Optional[float] = None
+
+                red_prices = await PricingEngine.get_storage_redundancy_unit_prices(current_redundancy, sa_region, currency)
+                if cost_val > 0 and red_prices:
+                    lrs_p = red_prices["lrs_unit_price"]
+                    curr_p = red_prices["current_unit_price"]
+                    if curr_p > lrs_p > 0:
+                        proposed_lrs_cost = round(cost_val * (lrs_p / curr_p), 2)
+                        est_monthly_saving = round(max(0.0, cost_val - proposed_lrs_cost), 2)
+                        est_annual_saving = round(est_monthly_saving * 12, 2)
+                        savings_pct = round((est_monthly_saving / cost_val) * 100.0, 2)
+
                 parsed = parse_azure_resource_id(sa_id)
 
                 findings.append(
@@ -148,32 +122,33 @@ class NonLrsStorageRedundancyAssessment(BaseAssessment):
                         resource_name=sa_name,
                         resource_type="Microsoft.Storage/storageAccounts",
                         resource_id=sa_id,
-                        region=sa.get("location", "global"),
+                        region=sa_region or "global",
                         severity="High" if "GRS" in current_redundancy else "Medium",
                         status=f"Non-LRS ({current_redundancy})",
                         current_configuration=f"Environment: {env_val} | Current Redundancy: {current_redundancy} | SKU: {sku_name}",
-                        measured_value=f"Configured with {current_redundancy} in test environment",
+                        measured_value=f"Configured with {current_redundancy}",
                         recommended_configuration="Migrate storage account redundancy to LRS (Locally Redundant Storage)",
-                        recommendation=f"Storage account '{sa_name}' is deployed in test environment '{env_val}' with {current_redundancy} redundancy. Convert to LRS to reduce recurring replication cost.",
+                        recommendation=f"Storage account '{sa_name}' in '{env_val}' uses {current_redundancy} redundancy. Convert to LRS if durability/DR requirements permit.",
                         metric_period=f"Last Completed Month ({cost_month})",
-                        data_source="Azure Storage Accounts API & Cost Management Query API",
+                        data_source="Azure Storage Accounts API, Cost Management & Azure Retail Prices API",
                         evidence={
                             "environment": env_val,
                             "current_redundancy": current_redundancy,
                             "required_redundancy": "LRS",
                             "sku_name": sku_name,
                             "actual_cost_mtd": round(cost_val, 2),
-                            "savings_pct": f"{int(savings_pct * 100)}%",
+                            "proposed_lrs_cost": proposed_lrs_cost,
+                            "savings_pct": f"{savings_pct:.1f}%" if savings_pct is not None else None,
                             "cost_month": cost_month
                         },
                         current_monthly_cost=round(cost_val, 2),
                         estimated_monthly_savings=est_monthly_saving,
                         estimated_annual_savings=est_annual_saving,
                         currency=currency,
-                        savings_type="Scenario Savings",
-                        confidence="High",
-                        calculation_method=f"Switching from {current_redundancy} to LRS reduces storage cost by ~{int(savings_pct * 100)}% by eliminating cross-region replication",
-                        validation_required="Confirm test workload data does not require multi-region disaster recovery replication",
+                        savings_type="Scenario Savings" if est_monthly_saving is not None else "Not Estimated",
+                        confidence="High" if est_monthly_saving is not None else "Low",
+                        calculation_method="Monthly savings = current eligible redundancy cost - proposed LRS cost (via Azure Retail Prices API); savings % = savings/current eligible cost; annual = monthly * 12",
+                        validation_required="Only if durability, availability, recovery and business requirements permit.",
                         collected_at=now_str
                     )
                 )

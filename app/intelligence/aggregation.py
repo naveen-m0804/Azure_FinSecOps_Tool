@@ -32,13 +32,21 @@ class AssessmentAggregator:
             SavingsDeduplicationEngine.deduplicate_savings(cost_findings)
         )
 
-        # Security counts by severity
+        # Security counts by severity (unhealthy / non-compliant findings only)
+        _healthy_statuses = {
+            "healthy", "compliant", "notapplicable", "not applicable",
+            "passed", "ok", "up to date", "actively supported"
+        }
+        unhealthy_security_findings = [
+            f for f in security_findings
+            if str(getattr(f, "status", "") or "").strip().lower() not in _healthy_statuses
+        ]
         sec_severity_counts = {
-            "Critical": sum(1 for f in security_findings if f.severity == "Critical"),
-            "High": sum(1 for f in security_findings if f.severity == "High"),
-            "Medium": sum(1 for f in security_findings if f.severity == "Medium"),
-            "Low": sum(1 for f in security_findings if f.severity == "Low"),
-            "Informational": sum(1 for f in security_findings if f.severity == "Informational"),
+            "Critical": sum(1 for f in unhealthy_security_findings if f.severity == "Critical"),
+            "High": sum(1 for f in unhealthy_security_findings if f.severity == "High"),
+            "Medium": sum(1 for f in unhealthy_security_findings if f.severity == "Medium"),
+            "Low": sum(1 for f in unhealthy_security_findings if f.severity == "Low"),
+            "Informational": sum(1 for f in unhealthy_security_findings if f.severity == "Informational"),
         }
 
         # Cost savings by confidence
@@ -182,7 +190,7 @@ class AssessmentAggregator:
             "completed_modules": completed_modules,
             "failed_modules": failed_modules,
             "total_findings": len(all_findings),
-            "security_findings_count": len(security_findings),
+            "security_findings_count": len(unhealthy_security_findings),
             "cost_findings_count": len(cost_findings),
             "security_severity_counts": sec_severity_counts,
             "findings_by_severity": {k.lower(): v for k, v in sec_severity_counts.items()},

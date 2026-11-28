@@ -220,10 +220,13 @@ def generate_security_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_
                 row_vals = extract_security_finding_row(ass.assessment_id, f)
                 formatted_row = []
                 for val in row_vals:
-                    val_str = escape_xml(val)
+                    raw_val = str(val) if val is not None else ""
+                    if len(raw_val) > 350:
+                        raw_val = raw_val[:347] + "..."
+                    val_str = escape_xml(raw_val)
                     # Color code severities
-                    if val in ["Critical", "High", "Medium", "Low"]:
-                        sev_color = COLOR_SEV_CRITICAL if val == "Critical" else (COLOR_SEV_HIGH if val == "High" else COLOR_SEV_MEDIUM)
+                    if raw_val in ["Critical", "High", "Medium", "Low"]:
+                        sev_color = COLOR_SEV_CRITICAL if raw_val == "Critical" else (COLOR_SEV_HIGH if raw_val == "High" else COLOR_SEV_MEDIUM)
                         formatted_row.append(Paragraph(f"<font color='{sev_color.hexval()}'><b>{val_str}</b></font>", styles["TableCellSmallBold"]))
                     else:
                         formatted_row.append(Paragraph(val_str, styles["TableCellSmall"]))
@@ -247,7 +250,10 @@ def generate_security_pdf(job_data: Dict[str, Any], workspace_name: str, tenant_
             sec_block.append(Paragraph("<i>No security gaps identified. All evaluated resources satisfy baseline controls.</i>", styles["TableCellSmall"]))
 
         sec_block.append(Spacer(1, 10))
-        story.append(KeepTogether(sec_block))
+        if len(table_findings) <= 8:
+            story.append(KeepTogether(sec_block))
+        else:
+            story.extend(sec_block)
 
     doc.build(story, canvasmaker=NumberedCanvas)
     return buffer.getvalue()

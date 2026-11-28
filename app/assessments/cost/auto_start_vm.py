@@ -9,7 +9,7 @@ from app.azure.monitor import MonitorAdapter
 from app.azure.cost_management import CostManagementAdapter
 from app.azure.pricing import PricingEngine
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.environment import resolve_environment, matches_target_tags
 
 
 def _parse_iso_datetime(dt_val: Any) -> Optional[datetime.datetime]:
@@ -120,6 +120,8 @@ class AutoStartVmAssessment(BaseAssessment):
                 vm_id = vm.get("id", "")
                 norm_id = normalize_resource_id(vm_id)
                 tags = vm.get("tags") or {}
+                if not matches_target_tags(tags, context.target_tags):
+                    continue
                 parsed = parse_azure_resource_id(vm_id)
                 rg = parsed.get("resource_group") or vm.get("resourceGroup") or "Unknown"
 
@@ -217,17 +219,30 @@ class AutoStartVmAssessment(BaseAssessment):
                 has_off_hours_activity = len(off_hours_log_entries) > 0
 
                 if is_running_in_shutdown or has_off_hours_activity or has_weekend_start:
-                    vm_size = props.get("hardwareProfile", {}).get("vmSize", "Standard_D2s_v5")
-                    rates = PricingEngine.get_vm_rates(vm_size)
-                    hourly_rate = rates.get("hourly", 0.096)
+                    vm_size = props.get("hardwareProfile", {}).get("vmSize")
+                    vm_region = vm.get("location", "")
+                    os_type = props.get("storageProfile", {}).get("osDisk", {}).get("osType", "Linux")
 
                     cost_item = cost_map.get(norm_id, {})
-                    cost_val = float(cost_item.get("cost", rates.get("monthly", 70.08)))
+                    actual_cost = cost_item.get("cost")
                     currency = cost_item.get("currency", context.currency)
 
-                    # Compute financial impact: 12 off-hours/day * 30 days = 360 hours/month
-                    annual_impact = round(360 * hourly_rate * 12, 2)
-                    monthly_impact = round(360 * hourly_rate, 2)
+                    cost_val: Optional[float] = None
+                    hourly_rate: Optional[float] = None
+                    if actual_cost is not None and actual_cost > 0:
+                        cost_val = float(actual_cost)
+                        hourly_rate = round(cost_val / 730.0, 4)
+                    elif vm_size:
+                        vm_rates = await PricingEngine.get_vm_rates(vm_size, vm_region, os_type=os_type, currency=currency)
+                        if vm_rates:
+                            cost_val = vm_rates.get("monthly")
+                            hourly_rate = vm_rates.get("hourly")
+
+                    # Formula (R18): Weekday shutdown 10 hours/day * 5 days/week -> 2600 annual shutdown hours / 8760 = 29.68%
+                    assumption_ratio = 2600.0 / 8760.0
+                    assumption_pct = round(assumption_ratio * 100.0, 2)  # 29.68%
+                    monthly_impact: Optional[float] = round(cost_val * assumption_ratio, 2) if (cost_val is not None and cost_val > 0) else None
+                    annual_impact: Optional[float] = round(monthly_impact * 12.0, 2) if monthly_impact is not None else None
 
                     # Determine descriptive status and activity summary
                     if is_running_in_shutdown and has_off_hours_activity:
@@ -274,9 +289,9 @@ class AutoStartVmAssessment(BaseAssessment):
                             resource_type="Microsoft.Compute/virtualMachines",
                             resource_id=vm_id,
                             region=vm.get("location", "global"),
-                            severity="High" if annual_impact > 600.0 else "Medium",
+                            severity="High" if (annual_impact or 0) > 600.0 else "Medium",
                             status=status_label,
-                            current_configuration=f"Size: {vm_size} | Shutdown: {shutdown_time_str} | State: {power_state}",
+                            current_configuration=f"Size: {vm_size or 'Unknown'} | Shutdown: {shutdown_time_str} | State: {power_state}",
                             measured_value=measured_val,
                             recommended_configuration="Ensure VM shuts down during off-hours; deallocate when ad-hoc off-hours work completes",
                             recommendation=rec_label,
@@ -292,18 +307,19 @@ class AutoStartVmAssessment(BaseAssessment):
                                 "auto_start_status": auto_start_status,
                                 "configured_start_time": configured_start_time,
                                 "hourly_rate": hourly_rate,
+                                "savings_pct": assumption_pct,
                                 "annual_cost_impact": annual_impact,
-                                "actual_cost_mtd": round(cost_val, 2),
+                                "actual_cost_mtd": round(cost_val, 2) if cost_val is not None else None,
                                 "cost_month": cost_month
                             },
-                            current_monthly_cost=round(cost_val, 2),
+                            current_monthly_cost=round(cost_val, 2) if cost_val is not None else None,
                             estimated_monthly_savings=monthly_impact,
                             estimated_annual_savings=annual_impact,
                             currency=currency,
-                            savings_type="Cost Avoidance",
-                            confidence="High",
-                            calculation_method=f"Off-hours runtime avoidance: 360 off-hours/mo * ${hourly_rate:.3f}/hr rate",
-                            validation_required="Confirm with application owner that continuous off-hours execution is not required",
+                            savings_type="Scenario Savings" if monthly_impact is not None else "Not Estimated",
+                            confidence="Medium" if monthly_impact is not None else "Low",
+                            calculation_method="Assumption % = 2600/8760 (29.68%); monthly savings = eligible VM compute cost * 29.68%; annual = monthly * 12",
+                            validation_required="Apply only to eligible compute; verify schedule and actual shutdowns. Potentially duplicate with Auto Shutdown Status.",
                             collected_at=now_str
                         )
                     )

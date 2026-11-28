@@ -156,7 +156,9 @@ def get_cost_high_level_summary(results: Dict[str, Any], curr_symbol: str = "$")
                 has_run = True
                 cnt = res.findings_count if hasattr(res, "findings_count") else (res.get("findings_count", 0) if isinstance(res, dict) else 0)
                 total_findings += cnt
-                total_annual += extract_module_annual_savings(res)
+                # Per Savings Formula Guide (R7, R10): Top 20 and Disk Space Alert are reference/evidence only; do not add separately
+                if mid not in ("top_20_opportunities", "top_opportunities", "disk_space", "cost_comparison"):
+                    total_annual += extract_module_annual_savings(res)
 
                 st = getattr(res, "status", None) if not isinstance(res, dict) else res.get("status")
                 st_str = st.value if hasattr(st, "value") else str(st or "")
@@ -205,20 +207,21 @@ def get_security_high_level_summary(results: Dict[str, Any]) -> List[Dict[str, A
                 cnt = res.findings_count if hasattr(res, "findings_count") else (res.get("findings_count", 0) if isinstance(res, dict) else 0)
                 total_findings += cnt
 
-                # Check security score improvement
-                imp = getattr(res, "security_score_improvement", None) if not isinstance(res, dict) else res.get("security_score_improvement")
-                if imp:
-                    total_impact += float(imp)
-                else:
-                    findings = res.findings if hasattr(res, "findings") else (res.get("findings", []) if isinstance(res, dict) else [])
-                    if findings:
-                        for f in findings:
-                            imp_f = getattr(f, "security_score_impact", None) if not isinstance(f, dict) else f.get("security_score_impact")
-                            if imp_f:
-                                try:
-                                    total_impact += float(imp_f)
-                                except Exception:
-                                    pass
+                # Check security score improvement (exclude new_recommendations from summary score potential)
+                if mid != "new_recommendations":
+                    imp = getattr(res, "security_score_improvement", None) if not isinstance(res, dict) else res.get("security_score_improvement")
+                    if imp:
+                        total_impact += float(imp)
+                    else:
+                        findings = res.findings if hasattr(res, "findings") else (res.get("findings", []) if isinstance(res, dict) else [])
+                        if findings:
+                            for f in findings:
+                                imp_f = getattr(f, "security_score_impact", None) if not isinstance(f, dict) else f.get("security_score_impact")
+                                if imp_f:
+                                    try:
+                                        total_impact += float(imp_f)
+                                    except Exception:
+                                        pass
 
                 st = getattr(res, "status", None) if not isinstance(res, dict) else res.get("status")
                 st_str = st.value if hasattr(st, "value") else str(st or "")

@@ -61,7 +61,7 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Runtime & Language** | Python | 3.11+ | High-concurrency async coroutines, strict typing, and cross-platform reliability. |
 | **Web & REST Framework** | FastAPI / Starlette / Flask | 0.110+ | Ultra-low latency asynchronous API endpoints, dependency injection, OpenAPI documentation. |
-| **Autonomous AI Gateway** | Multi-Provider Agentic AI | 3.0+ | NVIDIA Nemotron (`nvidia/nemotron-3.5-super-vl-120b-a12b`), Groq Cloud (`openai/gpt-oss-120b`), OpenAI, Gemini, Claude. |
+| **Autonomous AI Gateway** | Google Cloud Vertex AI | v1 | Autonomous multi-step tool calling via `VertexAIInferenceProvider` (`gemini-2.5-flash` / `gemini-2.5-pro`) using `VERTEX_AI_API_KEY`. |
 | **Agent Tool Execution** | Dynamic Tool Calling Engine | 15 Tools | 12 domain-specific tools + 3 dynamic runtime tools (`dynamic_code_interpreter`, `azure_generic_resource_query`, `azure_rest_call`). |
 | **Authentication & IAM** | MSAL Python (`msal`) | 1.28+ | Microsoft identity platform OAuth2 Client Credentials flow; acquires ARM tokens without secret exposure. |
 | **HTTP Transport Engine** | HTTPX (`httpx`) | 0.27+ | Asynchronous HTTP client with connection pooling, retries, and timeout management for Azure endpoints. |
@@ -124,8 +124,8 @@ The platform exports governance deliverables in two formats:
 * **Execution Safety Lockout:** During assessment execution, all execution triggers (`Run All`, `Run Security`, `Run Cost`, and card-level module buttons) are disabled via `.btn-disabled` (`pointer-events: none`).
 
 ### 3.5 Enterprise Agentic AI Engine & Dynamic Tool Calling
-* **Universal Multi-Provider Gateway:** Pluggable AI inference architecture supporting NVIDIA Nemotron (`nvidia/nemotron-3.5-super-vl-120b-a12b` via NVIDIA NIM), Groq Cloud (`openai/gpt-oss-120b`), OpenAI, Anthropic Claude, Google Gemini, and Azure OpenAI.
-* **Autonomous Multi-Step Tool Calling Loop:** Agents autonomously inspect requests, select tools, analyze intermediate Azure responses, and iterate through up to 8 tool executions before producing executive answers.
+* **Google Cloud Vertex AI Gateway:** Dedicated `VertexAIInferenceProvider` calling the Vertex AI `generateContent` API (`VERTEX_AI_API_KEY`) with native `functionDeclarations` and `functionResponse` handling.
+* **Autonomous Multi-Step Tool Calling Loop:** Agents autonomously inspect requests, select tools, analyze intermediate Azure responses, and iterate through up to `AI_MAX_TOOL_CALLS` (default 10) tool executions before producing executive answers.
 * **15 Enterprise Agent Tools:**
   - **12 Domain-Specific Tools:** Specialized assessment evaluators for Secure Score, Defender alerts, VM rightsizing, orphaned disks, unattached public IPs, SQL database metrics, diagnostic logs, and cost spikes.
   - **3 Dynamic Runtime Tools:**
@@ -138,16 +138,17 @@ The platform exports governance deliverables in two formats:
 
 ## 4. Hardware & Deployment Recommendations
 
-### 4.1 On-Premises or Cloud Container Deployment
-* **Container Runtime:** Docker Engine 24+, Podman, or Azure Container Apps (ACA).
+### 4.1 Container & GCP Cloud Run Deployment
+* **Container Runtime:** Docker Engine 24+, Podman, or **Google Cloud Run** (see `GCP_CLOUD_RUN_DEPLOYMENT_GUIDE.md`).
 * **Base Image:** `python:3.11-slim-bookworm` (minimal footprint, hardened against common CVEs).
 * **Compute Footprint:**
   - Minimum: 1 vCPU, 1 GB RAM (evaluates up to 5 subscriptions).
-  - Recommended Enterprise: 2 vCPUs, 4 GB RAM (evaluates 50+ subscriptions concurrently).
+  - Recommended Enterprise: 2 vCPUs, 2–4 GB RAM (evaluates 50+ subscriptions concurrently).
 * **Networking:** Outbound HTTPS (`TCP 443`) to:
   - `login.microsoftonline.com` (Azure AD token issuance)
-  - `management.azure.com` (ARM and Azure Resource Graph)
+  - `management.azure.com` (ARM, Resource Graph, Monitor, Defender, Cost Management)
   - `prices.azure.com` (Azure Retail Prices API)
+  - `aiplatform.googleapis.com` (Google Cloud Vertex AI)
 
 ---
 

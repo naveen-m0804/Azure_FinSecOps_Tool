@@ -187,8 +187,6 @@ class FinSecOpsGuardrails:
             r'\1: [REDACTED_BY_SECURITY_POLICY]',
             text
         )
-        text = re.sub(r'gsk_[a-zA-Z0-9]{30,}', '[REDACTED_GROQ_KEY]', text)
-        text = re.sub(r'nvapi-[a-zA-Z0-9_\-]{30,}', '[REDACTED_NVIDIA_KEY]', text)
-        text = re.sub(r'hf_[a-zA-Z0-9]{30,}', '[REDACTED_HF_KEY]', text)
+        text = re.sub(r'AIza[0-9A-Za-z\-_]{30,}', '[REDACTED_VERTEX_API_KEY]', text)
         text = re.sub(r'ey[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}', '[REDACTED_JWT_TOKEN]', text)
         return text

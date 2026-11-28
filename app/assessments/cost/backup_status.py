@@ -7,7 +7,8 @@ from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
 from app.azure.backup import BackupAdapter
 from app.azure.cost_management import CostManagementAdapter
-from app.utils.environment import resolve_environment
+from app.azure.pricing import PricingEngine
+from app.utils.environment import resolve_environment, matches_target_tags
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
 
 logger = logging.getLogger("azure_finsecops.assessments.backup_status")
@@ -180,6 +181,8 @@ class BackupStatusAssessment(BaseAssessment):
                 vault_rg = vault_parsed.get("resource_group", "")
                 vault_loc = vault.get("location", "global")
                 vault_tags = vault.get("tags") or {}
+                if not matches_target_tags(vault_tags, context.target_tags):
+                    continue
 
                 env_val = resolve_environment(
                     vault_tags, vault_name, vault_rg,
@@ -244,9 +247,9 @@ class BackupStatusAssessment(BaseAssessment):
                     else:
                         policy_share_cost = round(vault_cost, 2)
 
-                    # Estimate backup storage volume from allocated spend (~$0.024/GB-month)
-                    storage_rate = 0.024
-                    if policy_share_cost > 0:
+                    # Estimate backup storage volume from allocated spend using Azure Retail Prices API
+                    storage_rate = await PricingEngine.get_backup_storage_gb_price(vault_loc, vault_currency)
+                    if policy_share_cost > 0 and storage_rate and storage_rate > 0:
                         est_storage_gb = round(policy_share_cost / storage_rate, 1)
                         est_storage_tb = round(est_storage_gb / 1024, 2)
                         if est_storage_tb >= 1.0:
@@ -394,6 +397,7 @@ class BackupStatusAssessment(BaseAssessment):
                                     "backup_storage_tb": est_storage_tb,
                                     "backup_storage_display": backup_storage_disp,
                                     "protected_items_count": items_for_policy,
+                                    "savings_pct": round(max_excess_ratio * 100.0, 2) if est_monthly_saving else None,
                                     "cost_month": cost_month
                                 },
                                 current_monthly_cost=round(policy_share_cost, 2) if policy_share_cost > 0 else (round(vault_cost, 2) if vault_cost > 0 else None),
@@ -401,12 +405,12 @@ class BackupStatusAssessment(BaseAssessment):
                                 estimated_annual_savings=est_annual_saving,
                                 currency=vault_currency,
                                 savings_type=savings_type,
-                                confidence="High",
+                                confidence="High" if est_monthly_saving else "Low",
                                 calculation_method=(
-                                    f"Excess retention ratio ({int(max_excess_ratio * 100)}%) applied to policy allocated monthly expenditure"
+                                    "Monthly savings = current backup cost/policy - proposed backup cost/policy; % = savings/current cost; annual = monthly * 12"
                                     if est_monthly_saving else "Cost telemetry not available for vault storage sizing"
                                 ),
-                                validation_required="Verify compliance, audit, and disaster recovery recovery point objectives before altering retention schedules",
+                                validation_required="Confirm compliance, restore points, vault redundancy and backup storage; don't assume deletion.",
                                 collected_at=now_str
                             )
                         )

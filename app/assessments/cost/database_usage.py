@@ -8,8 +8,9 @@ from app.schemas.finding import FindingModel
 from app.azure.database import DatabaseAdapter
 from app.azure.monitor import MonitorAdapter
 from app.azure.cost_management import CostManagementAdapter
+from app.azure.pricing import PricingEngine
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.environment import resolve_environment, matches_target_tags
 from app.utils.dates import get_observation_window
 
 
@@ -83,49 +84,18 @@ def _extract_resource_group(resource_id: str, fallback: Optional[str] = None) ->
     return fallback or "--"
 
 
-def _get_database_monthly_cost(sku_name: str, tier_name: str = "", allocated_gb: float = 250.0) -> float:
-    """Computes realistic Azure database tier rates based on Microsoft pricing."""
-    name = str(sku_name).upper()
-    tier = str(tier_name).upper()
-    if "BASIC" in name or "B" == name:
-        base = 4.99
-    elif "S0" in name:
-        base = 14.72
-    elif "S1" in name:
-        base = 29.43
-    elif "S2" in name:
-        base = 73.58
-    elif "S3" in name:
-        base = 147.16
-    elif "S4" in name:
-        base = 294.32
-    elif "S6" in name:
-        base = 588.64
-    elif "S7" in name:
-        base = 1177.28
-    elif "GP" in name or "GENERAL" in name or "GENERALPURPOSE" in tier:
-        if "2" in name:
-            base = 240.00
-        elif "4" in name:
-            base = 480.00
-        elif "8" in name:
-            base = 960.00
-        else:
-            base = 240.00
-    elif "BC" in name or "CRITICAL" in name or "MEMORYOPTIMIZED" in tier:
-        if "4" in name:
-            base = 1080.00
-        else:
-            base = 540.00
-    elif "B1" in name:
-        base = 25.50
-    elif "B2" in name:
-        base = 51.00
-    else:
-        base = 73.58
-
-    extra_storage_cost = max(0.0, allocated_gb - 250.0) * 0.17 if "S" in name else 0.0
-    return round(base + extra_storage_cost, 2)
+def _propose_lower_db_tier(sku_name: str, tier_name: str = "") -> Optional[str]:
+    """Proposes one step lower database service objective for right-sizing."""
+    s = (sku_name or "").upper().strip()
+    dtu_ladder = ["BASIC", "S0", "S1", "S2", "S3", "S4", "S6", "S7", "S9", "S12"]
+    for idx, lvl in enumerate(dtu_ladder):
+        if s == lvl or s.endswith(f" {lvl}"):
+            return dtu_ladder[idx - 1] if idx > 0 else None
+    p_ladder = ["P1", "P2", "P4", "P6", "P11", "P15"]
+    for idx, lvl in enumerate(p_ladder):
+        if s == lvl or s.endswith(f" {lvl}"):
+            return p_ladder[idx - 1] if idx > 0 else "S4"
+    return None
 
 
 class DatabaseUsageAssessment(BaseAssessment):
@@ -187,6 +157,10 @@ class DatabaseUsageAssessment(BaseAssessment):
 
                     # Skip system databases
                     if db_name.lower() in ("master", "tempdb", "model", "msdb"):
+                        continue
+
+                    db_tags = db.get("tags") or s.get("tags") or {}
+                    if not matches_target_tags(db_tags, context.target_tags):
                         continue
 
                     props = db.get("properties", {})
@@ -283,10 +257,14 @@ class DatabaseUsageAssessment(BaseAssessment):
                         if server_cost and server_cost > 0:
                             actual_cost = server_cost
 
-                    final_cost = actual_cost if actual_cost is not None and actual_cost > 0 else _get_database_monthly_cost(sku_name_raw, sku_tier_raw, allocated_gb)
+                    db_region = db.get("location") or s.get("location") or ""
+                    final_cost: Optional[float] = float(actual_cost) if (actual_cost is not None and actual_cost > 0) else await PricingEngine.get_sql_database_monthly_price(sku_name_raw, sku_tier_raw, db_region, currency)
 
                     # Determine accurate friendly database tier
-                    friendly_tier = _format_db_tier(sku, props, final_cost)
+                    friendly_tier = _format_db_tier(sku, props, final_cost or 0.0)
+                    effective_sku = friendly_tier.split()[-1] if " " in friendly_tier else friendly_tier
+                    if final_cost is None:
+                        final_cost = await PricingEngine.get_sql_database_monthly_price(effective_sku, sku_tier_raw, db_region, currency)
 
                     rg_name = _extract_resource_group(db_id, s.get("resourceGroup"))
                     db_tags = db.get("tags") or s.get("tags") or {}
@@ -300,23 +278,34 @@ class DatabaseUsageAssessment(BaseAssessment):
                     )
 
                     # Sizing & Performance Threshold Evaluation
+                    proposed_tier = None
+                    proposed_cost = None
+                    monthly_saving: Optional[float] = None
+                    savings_pct: Optional[float] = None
+
                     if dtu_utilization >= 85.0:
                         severity = "Critical" if dtu_utilization >= 90.0 else "High"
                         status_str = f"Saturated {metric_label} ({dtu_utilization:.1f}%)"
                         recommendation = f"Database '{db_name}' {metric_label} utilization is {dtu_utilization:.1f}%, exceeding the sizing threshold. Scale up tier to higher service objective to prevent query throttling."
-                        monthly_saving = 0.0
                         calc_method = f"Scale-up advised for sustained high {metric_label} utilization"
                     elif dtu_utilization <= 20.0:
                         severity = "Medium"
                         status_str = f"Underutilized {metric_label} ({dtu_utilization:.1f}%)"
-                        recommendation = f"Database '{db_name}' average {metric_label} utilization is {dtu_utilization:.1f}% on tier {friendly_tier}. Downsize tier to optimize compute expenditure."
-                        monthly_saving = round(final_cost * 0.35, 2)
-                        calc_method = f"Downsizing overprovisioned tier {friendly_tier} (est. 35% savings)"
+                        proposed_tier = _propose_lower_db_tier(friendly_tier, sku_tier_raw)
+                        if proposed_tier:
+                            proposed_cost = await PricingEngine.get_sql_database_monthly_price(proposed_tier, sku_tier_raw, db_region, currency)
+                        if final_cost is not None and final_cost > 0 and proposed_cost is not None:
+                            monthly_saving = round(max(0.0, final_cost - proposed_cost), 2)
+                            savings_pct = round((monthly_saving / final_cost) * 100.0, 2)
+                        recommendation = (
+                            f"Database '{db_name}' average {metric_label} utilization is {dtu_utilization:.1f}% on tier {friendly_tier}."
+                            + (f" Downsize to {proposed_tier}." if proposed_tier else " Evaluate downsizing tier (pricing comparison required).")
+                        )
+                        calc_method = "Monthly savings = current database tier cost - proposed tier cost; savings % = savings/current database cost; annual = monthly * 12"
                     else:
                         severity = "Informational"
                         status_str = f"Optimal Sizing ({dtu_utilization:.1f}%)"
                         recommendation = f"Database '{db_name}' {metric_label} utilization is healthy ({dtu_utilization:.1f}%)."
-                        monthly_saving = 0.0
                         calc_method = "Optimal tier sizing"
 
                     findings.append(
@@ -330,18 +319,21 @@ class DatabaseUsageAssessment(BaseAssessment):
                             resource_name=db_name,
                             resource_type="Microsoft.Sql/servers/databases",
                             resource_id=db_id,
-                            region=db.get("location", "global"),
+                            region=db_region or "global",
                             severity=severity,
                             status=status_str,
                             current_configuration=f"Tier: {friendly_tier} | {metric_label}: {dtu_utilization:.1f}% | Storage: {used_storage_gb}/{allocated_gb} GB ({storage_pct:.1f}%)",
                             measured_value=f"Avg {dtu_utilization:.1f}% ({metric_label})",
-                            recommended_configuration="Scale tier based on workload requirements",
+                            recommended_configuration=f"Downsize to {proposed_tier}" if proposed_tier else "Scale tier based on workload requirements",
                             recommendation=recommendation,
                             metric_period=f"Last Completed Month ({cost_month})",
                             data_source=f"Azure Monitor {metric_label}/Storage Metrics",
                             evidence={
                                 "database_tier": friendly_tier,
                                 "sku": friendly_tier,
+                                "proposed_tier": proposed_tier,
+                                "proposed_monthly_cost": proposed_cost,
+                                "savings_pct": savings_pct,
                                 "avg_dtu_cpu_pct": dtu_utilization,
                                 "dtu_percent": dtu_utilization,
                                 "dtu_metric_type": metric_label,
@@ -349,17 +341,17 @@ class DatabaseUsageAssessment(BaseAssessment):
                                 "storage_allocated_gb": allocated_gb,
                                 "storage_utilization_pct": storage_pct,
                                 "environment": env_name,
-                                "actual_cost_mtd": round(final_cost, 2),
+                                "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
                                 "cost_month": cost_month
                             },
-                            current_monthly_cost=round(final_cost, 2),
-                            estimated_monthly_savings=round(monthly_saving, 2),
-                            estimated_annual_savings=round(monthly_saving * 12, 2),
+                            current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
+                            estimated_monthly_savings=monthly_saving,
+                            estimated_annual_savings=round(monthly_saving * 12, 2) if monthly_saving is not None else None,
                             currency=currency,
-                            savings_type="Performance Right-Sizing" if monthly_saving > 0 else "Sizing Alert",
-                            confidence="High",
+                            savings_type="Performance Right-Sizing" if (monthly_saving is not None and monthly_saving > 0) else "Sizing Alert",
+                            confidence="High" if monthly_saving is not None else "Low",
                             calculation_method=calc_method,
-                            validation_required="Inspect top resource-consuming queries in Query Performance Insight",
+                            validation_required="Validate workload, peak DTU, storage, backup and performance; avoid duplicate Database Allocated vs Usage.",
                             collected_at=now_str
                         )
                     )
@@ -371,6 +363,8 @@ class DatabaseUsageAssessment(BaseAssessment):
                 pg_servers = []
 
             for pg in pg_servers:
+                if not matches_target_tags(pg.get("tags"), context.target_tags):
+                    continue
                 resources_evaluated += 1
                 pg_name = pg.get("name", "")
                 pg_id = pg.get("id", "")
@@ -410,25 +404,25 @@ class DatabaseUsageAssessment(BaseAssessment):
                 norm_id = normalize_resource_id(pg_id)
                 cost_info = cost_map.get(norm_id, {})
                 actual_cost = cost_info.get("cost")
-                final_cost = actual_cost if actual_cost is not None and actual_cost > 0 else 146.00
+                currency = cost_info.get("currency", context.currency)
+                final_cost: Optional[float] = float(actual_cost) if (actual_cost is not None and actual_cost > 0) else None
+                monthly_saving: Optional[float] = None
+                savings_pct: Optional[float] = None
 
                 if cpu_util >= 85.0:
                     severity = "Critical" if cpu_util >= 90.0 else "High"
                     status_str = f"Saturated CPU ({cpu_util:.1f}%)"
                     recommendation = f"PostgreSQL server '{pg_name}' CPU is at {cpu_util:.1f}%. Scale up compute tier."
-                    monthly_saving = 0.0
                     calc_method = "Scale-up advised for high compute load"
                 elif cpu_util <= 20.0:
                     severity = "Medium"
                     status_str = f"Underutilized CPU ({cpu_util:.1f}%)"
-                    recommendation = f"PostgreSQL server '{pg_name}' average CPU is only {cpu_util:.1f}%. Downsize tier to optimize cost."
-                    monthly_saving = round(final_cost * 0.35, 2)
-                    calc_method = f"Downsizing overprovisioned tier {sku_str}"
+                    recommendation = f"PostgreSQL server '{pg_name}' average CPU is only {cpu_util:.1f}%. Evaluate downsizing compute tier (pricing comparison required)."
+                    calc_method = "Monthly savings = current database tier cost - proposed tier cost; pricing comparison required"
                 else:
                     severity = "Informational"
                     status_str = f"Optimal Sizing ({cpu_util:.1f}%)"
                     recommendation = f"PostgreSQL server '{pg_name}' CPU utilization is healthy ({cpu_util:.1f}%)."
-                    monthly_saving = 0.0
                     calc_method = "Optimal tier sizing"
 
                 findings.append(
@@ -459,17 +453,18 @@ class DatabaseUsageAssessment(BaseAssessment):
                             "storage_used_gb": used_st_gb,
                             "storage_allocated_gb": alloc_gb,
                             "environment": env_name,
-                            "actual_cost_mtd": round(final_cost, 2),
+                            "savings_pct": savings_pct,
+                            "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
                             "cost_month": cost_month
                         },
-                        current_monthly_cost=round(final_cost, 2),
-                        estimated_monthly_savings=round(monthly_saving, 2),
-                        estimated_annual_savings=round(monthly_saving * 12, 2),
-                        currency=context.currency,
-                        savings_type="Performance Right-Sizing" if monthly_saving > 0 else "Sizing Alert",
-                        confidence="High",
+                        current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
+                        estimated_monthly_savings=monthly_saving,
+                        estimated_annual_savings=round(monthly_saving * 12, 2) if monthly_saving is not None else None,
+                        currency=currency,
+                        savings_type="Performance Right-Sizing" if (monthly_saving is not None and monthly_saving > 0) else "Sizing Alert",
+                        confidence="High" if monthly_saving is not None else "Low",
                         calculation_method=calc_method,
-                        validation_required="Confirm performance requirements before scaling down compute",
+                        validation_required="Validate workload, peak CPU, storage, backup and performance; avoid duplicate Database Allocated vs Usage.",
                         collected_at=now_str
                     )
                 )

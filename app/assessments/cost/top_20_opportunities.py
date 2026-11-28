@@ -61,6 +61,7 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                     candidate_findings.append(f)
 
         # 2. If standalone execution without prior cached findings, query Cost Management for top spending resources
+        # Per Savings Formula Guide (R7): Shortlist only; do not fabricate savings or add separately.
         if not candidate_findings:
             cost_start, cost_end, cost_month = CostManagementAdapter.get_last_completed_month_date_range()
             for sub in context.subscriptions:
@@ -84,7 +85,6 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                         res_type = parsed.get("resource_type") or "Microsoft.Resources/resource"
                         rg = _extract_resource_group(res_id, parsed.get("resource_group"))
 
-                        est_mo_saving = round(cost_val * 0.25, 2)
                         candidate_findings.append(
                             FindingModel(
                                 finding_id=f"cost06-top-{idx}",
@@ -101,8 +101,8 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                                 status="Top Cost Consumer",
                                 current_configuration=f"Monthly Spend: {cost_val:,.2f} {curr}",
                                 measured_value=f"High spending cloud resource ({cost_val:,.2f} {curr})",
-                                recommended_configuration="Review utilization metrics and right-size or adopt commitment discounts",
-                                recommendation=f"Resource '{res_name}' in resource group '{rg}' is among the top cost drivers. Evaluate optimization potential.",
+                                recommended_configuration="Review underlying optimization assessments for exact savings",
+                                recommendation=f"Resource '{res_name}' in resource group '{rg}' is among the top cost drivers. Link to underlying optimization category.",
                                 metric_period=f"{cost_start} to {cost_end} ({cost_month})",
                                 data_source="Azure Cost Management Query API",
                                 evidence={
@@ -111,82 +111,18 @@ class Top20OpportunitiesAssessment(BaseAssessment):
                                     "assessment_type": "High Cost Resource"
                                 },
                                 current_monthly_cost=round(cost_val, 2),
-                                estimated_monthly_savings=est_mo_saving,
-                                estimated_annual_savings=round(est_mo_saving * 12, 2),
+                                estimated_monthly_savings=None,
+                                estimated_annual_savings=None,
                                 currency=curr,
-                                savings_type="Estimated Savings",
-                                confidence="Medium",
-                                calculation_method="Estimated 25% savings potential through right-sizing, reserved instances, or savings plans",
-                                validation_required="Validate workload requirements with service owners before taking action",
+                                savings_type="Shortlist Reference (Do Not Add)",
+                                confidence="Not Available",
+                                calculation_method="Shortlist only; calculate savings using the underlying relevant optimization category (do not add separately)",
+                                validation_required="Validate workload requirements with service owners and link to underlying optimization category",
                                 collected_at=now_str
                             )
                         )
                 except Exception as ex:
                     errors.append(f"Failed to query Cost Management for sub {sub.subscription_id}: {ex}")
-
-        # 3. If Cost Management returned no rows, fall back to discovered subscription resources
-        if not candidate_findings:
-            for sub in context.subscriptions:
-                try:
-                    res_list = await ResourcesAdapter.get_subscription_resources(context.client, sub.subscription_id)
-                    for idx, r in enumerate(res_list[:25], 1):
-                        r_id = r.get("id", "")
-                        r_name = r.get("name", f"Resource-{idx}")
-                        r_type = r.get("type", "Microsoft.Resources/resource")
-                        r_rg = _extract_resource_group(r_id, r.get("resourceGroup"))
-                        r_loc = r.get("location", "global")
-
-                        base_cost = 50.0
-                        if "virtualmachines" in r_type.lower():
-                            base_cost = 87.60
-                        elif "disks" in r_type.lower():
-                            base_cost = 19.71
-                        elif "storageaccounts" in r_type.lower():
-                            base_cost = 20.48
-                        elif "servers/databases" in r_type.lower():
-                            base_cost = 15.00
-                        elif "serverfarms" in r_type.lower():
-                            base_cost = 73.00
-
-                        est_mo_saving = round(base_cost * 0.25, 2)
-                        candidate_findings.append(
-                            FindingModel(
-                                finding_id=f"cost06-top-{idx}",
-                                assessment_id=self.assessment_id,
-                                category=self.category,
-                                subscription_id=sub.subscription_id,
-                                subscription_name=sub.display_name,
-                                resource_group=r_rg,
-                                resource_name=r_name,
-                                resource_type=r_type,
-                                resource_id=r_id,
-                                region=r_loc,
-                                severity="Medium",
-                                status="Top Cost Consumer",
-                                current_configuration=f"Estimated Monthly Baseline: {base_cost:,.2f} {context.currency}",
-                                measured_value=f"Cloud resource with estimated baseline spend of {base_cost:,.2f} {context.currency}",
-                                recommended_configuration="Review utilization metrics and right-size or adopt commitment discounts",
-                                recommendation=f"Resource '{r_name}' is a primary resource in resource group '{r_rg}'. Evaluate optimization potential.",
-                                metric_period="Current Billing Cycle",
-                                data_source="Azure Resource Graph & Pricing Engine",
-                                evidence={
-                                    "actual_cost_mtd": round(base_cost, 2),
-                                    "resource_group": r_rg,
-                                    "assessment_type": "High Cost Resource"
-                                },
-                                current_monthly_cost=round(base_cost, 2),
-                                estimated_monthly_savings=est_mo_saving,
-                                estimated_annual_savings=round(est_mo_saving * 12, 2),
-                                currency=context.currency,
-                                savings_type="Estimated Savings",
-                                confidence="Medium",
-                                calculation_method="Estimated 25% savings potential through right-sizing, reserved instances, or savings plans",
-                                validation_required="Validate workload requirements with service owners before taking action",
-                                collected_at=now_str
-                            )
-                        )
-                except Exception as ex:
-                    errors.append(f"Resource discovery fallback error for sub {sub.subscription_id}: {ex}")
 
         # Sort globally across the entire tenant descending by Annual Savings, then monthly cost
         candidate_findings.sort(
@@ -240,7 +176,7 @@ class Top20OpportunitiesAssessment(BaseAssessment):
             cloned_finding.evidence["resource_group"] = rg_verified
             findings.append(cloned_finding)
 
-        total_monthly = sum((f.estimated_monthly_savings or 0.0) for f in findings)
+        # Per Savings Formula Guide (R7): Top 20 is a shortlist only; do not add separately.
         status = AssessmentStatus.COMPLETED if findings else AssessmentStatus.NO_FINDINGS
 
         return AssessmentResult(
@@ -251,8 +187,8 @@ class Top20OpportunitiesAssessment(BaseAssessment):
             resources_evaluated=len(candidate_findings),
             findings_count=len(findings),
             findings=findings,
-            total_monthly_savings=round(total_monthly, 2),
-            total_annual_savings=round(total_monthly * 12, 2),
+            total_monthly_savings=0.0,
+            total_annual_savings=0.0,
             currency=context.currency,
             errors=errors,
             execution_time_seconds=round(time.time() - start_t, 2),

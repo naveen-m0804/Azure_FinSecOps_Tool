@@ -1,11 +1,12 @@
 import datetime
+import json
 import time
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from app.assessments.base import BaseAssessment, AssessmentContext
 from app.schemas.assessment import AssessmentResult, AssessmentStatus
 from app.schemas.finding import FindingModel
-from app.azure.defender import DefenderAdapter
+from app.azure.defender import DefenderAdapter, clean_html_text
 from app.utils.resource_ids import parse_azure_resource_id
 
 
@@ -59,7 +60,9 @@ def resolve_target_resource(item: Dict[str, Any], sub_id: str, sub_name: str) ->
 
     raw_res_id = (
         res_details.get("Id")
+        or res_details.get("ResourceId")
         or res_details.get("id")
+        or res_details.get("resourceId")
         or item.get("id", "")
     ).strip()
 
@@ -96,6 +99,58 @@ def resolve_target_resource(item: Dict[str, Any], sub_id: str, sub_name: str) ->
     }
 
 
+def _parse_additional_software_fields(add_data: Dict[str, Any], display_name: str) -> Dict[str, str]:
+    """Extracts software/patch metadata from Defender additionalData when present."""
+    software_name = str(add_data.get("SoftwareName") or add_data.get("softwareName") or "").strip()
+    if not software_name and display_name.lower().startswith("update "):
+        software_name = display_name[7:].strip()
+
+    publisher = str(add_data.get("SoftwareVendor") or add_data.get("vendor") or "--").strip() or "--"
+
+    installed_ver = "--"
+    raw_detected = add_data.get("DetectedSoftwareVersions") or add_data.get("version")
+    if isinstance(raw_detected, str) and raw_detected.strip().startswith("["):
+        try:
+            parsed_vers = json.loads(raw_detected)
+            if isinstance(parsed_vers, list) and parsed_vers:
+                installed_ver = ", ".join(str(v) for v in parsed_vers if v)
+        except Exception:
+            installed_ver = raw_detected
+    elif isinstance(raw_detected, list) and raw_detected:
+        installed_ver = ", ".join(str(v) for v in raw_detected if v)
+    elif raw_detected:
+        installed_ver = str(raw_detected).strip()
+
+    fixed_ver = str(add_data.get("FixedVersion") or add_data.get("fixedVersion") or "").strip()
+    if not fixed_ver and add_data.get("Kbid"):
+        fixed_ver = f"KB{add_data.get('Kbid')}"
+
+    cve_str = "--"
+    raw_cves = add_data.get("CvesDetails")
+    if isinstance(raw_cves, str) and raw_cves.strip().startswith("["):
+        try:
+            cve_items = json.loads(raw_cves)
+            seen_cves = []
+            for c in cve_items:
+                cid = c.get("CveId")
+                if cid and cid not in seen_cves:
+                    seen_cves.append(cid)
+                if not fixed_ver and c.get("FixedVersion"):
+                    fixed_ver = str(c.get("FixedVersion")).strip()
+            if seen_cves:
+                cve_str = ", ".join(seen_cves[:5]) + (f" (+{len(seen_cves) - 5} more)" if len(seen_cves) > 5 else "")
+        except Exception:
+            pass
+
+    return {
+        "software_name": software_name or "--",
+        "publisher": publisher,
+        "installed_version": installed_ver or "--",
+        "recommended_version": fixed_ver or "--",
+        "cve": cve_str,
+    }
+
+
 class NewSecurityRecommendationsAssessment(BaseAssessment):
     assessment_id = "new_recommendations"
     code = "SEC-02"
@@ -104,7 +159,7 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
     description = "Identify newly available or active recommendations from Microsoft Defender for Cloud detected within the last 30 days."
     purpose = "Detect recent security gaps and newly generated Defender security recommendations from current date to last 30 days."
     required_permissions = ["Microsoft.Security/assessments/read", "Security Reader"]
-    required_data_sources = ["Defender for Cloud Assessments API (2021-06-01)"]
+    required_data_sources = ["Defender for Cloud Assessments API (2021-06-01) & Azure Resource Graph"]
 
     async def run(self, context: AssessmentContext) -> AssessmentResult:
         start_t = time.time()
@@ -114,41 +169,58 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
         errors: List[str] = []
         resources_evaluated = 0
 
-        # Load Defender assessment metadata definitions for dynamic enrichment
         metadata_cache = await DefenderAdapter.get_assessment_metadata(context.client)
+        control_map = await DefenderAdapter.get_security_control_map(context.client)
 
         for sub in context.subscriptions:
-            resp = await DefenderAdapter.get_security_assessments(context.client, sub.subscription_id, max_items=1000)
-            if not resp.get("success"):
-                status_code = resp.get("status_code", 500)
-                if status_code in (401, 403):
-                    errors.append(f"Subscription '{sub.display_name}': Permission Missing (Microsoft.Security/assessments/read)")
-                else:
-                    errors.append(f"Subscription '{sub.display_name}': {resp.get('error', 'Error fetching assessments')}")
-                continue
+            items: List[Dict[str, Any]] = []
+            try:
+                items = await DefenderAdapter.get_security_assessments_via_arg(
+                    context.client, sub.subscription_id, unhealthy_only=True
+                )
+            except Exception:
+                items = []
 
-            items = resp.get("value", [])
+            if not items:
+                resp = await DefenderAdapter.get_security_assessments(context.client, sub.subscription_id, max_items=1000)
+                if not resp.get("success"):
+                    status_code = resp.get("status_code", 500)
+                    if status_code in (401, 403):
+                        errors.append(f"Subscription '{sub.display_name}': Permission Missing (Microsoft.Security/assessments/read)")
+                    else:
+                        errors.append(f"Subscription '{sub.display_name}': {resp.get('error', 'Error fetching assessments')}")
+                    continue
+                items = resp.get("value", [])
+
+            seen_keys = set()
             for item in items:
                 resources_evaluated += 1
                 props = item.get("properties", {}) or {}
                 status_obj = props.get("status", {}) or {}
-                status_code = status_obj.get("code", "")
+                status_code = str(status_obj.get("code") or "").strip()
 
                 # Only report unresolved security gaps: Unhealthy / Open recommendations
                 if status_code.lower() not in ("unhealthy", "open", "actionrequired", "active"):
                     continue
 
                 # STRICT LAST 30 DAYS FIRST DETECTED FILTER:
-                # Only show recommendations from current date to last 30 days.
-                # If date is missing, older than 30 days (> 30.0), or in the future (< -1.0), exclude.
                 date_str, days_old = extract_first_detected_date(item)
                 if date_str is None or days_old is None:
                     continue
                 if days_old > 30.0 or days_old < -1.0:
                     continue
 
-                item_key = (item.get("name") or "").lower()
-                cached_meta = metadata_cache.get(item_key, {})
+                item_key = (item.get("name") or "").strip().lower()
+                raw_meta_id = (
+                    props.get("assessmentMetaDataId")
+                    or props.get("assessmentMetadataId")
+                    or props.get("metadataId")
+                    or (props.get("metadata", {}) or {}).get("assessmentMetadataId")
+                    or item_key
+                )
+                meta_id = str(raw_meta_id).split("/")[-1].strip().lower()
+
+                cached_meta = metadata_cache.get(meta_id) or metadata_cache.get(item_key) or {}
                 metadata = props.get("metadata", {}) or cached_meta
 
                 display_name = (
@@ -156,23 +228,24 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
                     or metadata.get("displayName")
                     or cached_meta.get("displayName")
                     or item.get("name", "Unknown Recommendation")
-                )
+                ).strip()
 
-                severity = (
+                severity = str(
                     metadata.get("severity")
                     or cached_meta.get("severity")
+                    or status_obj.get("severity")
                     or props.get("severity")
                     or "Medium"
-                )
+                ).strip().capitalize()
 
-                description = (
+                raw_desc = (
                     metadata.get("description")
                     or cached_meta.get("description")
                     or status_obj.get("description")
                     or "Security configuration gap identified by Defender for Cloud."
                 )
+                description = clean_html_text(raw_desc) or "Security configuration gap identified by Defender for Cloud."
 
-                # Official Azure remediation guidance directly from Defender metadata
                 remediation_raw = (
                     metadata.get("remediationDescription")
                     or cached_meta.get("remediationDescription")
@@ -183,53 +256,37 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
                     or ""
                 )
                 if isinstance(remediation_raw, list):
-                    remediation = "\n".join(str(s) for s in remediation_raw if s)
+                    remediation = clean_html_text("\n".join(str(s) for s in remediation_raw if s))
                 else:
-                    remediation = str(remediation_raw).strip()
+                    remediation = clean_html_text(remediation_raw)
                 if not remediation or remediation == "--":
                     remediation = f"Remediate Defender recommendation '{display_name}' according to official Microsoft Azure guidance."
 
-                # Security control and potential score impact
+                # Official Security Control from Defender secureScoreControlDefinitions
+                rec_cat = metadata.get("recommendationCategory") or cached_meta.get("recommendationCategory")
                 sec_ctrl = (
-                    metadata.get("securityControl")
+                    control_map.get(meta_id)
+                    or control_map.get(item_key)
+                    or metadata.get("securityControl")
                     or cached_meta.get("securityControl")
-                    or (metadata.get("categories", ["General"])[0] if metadata.get("categories") else None)
-                    or (cached_meta.get("categories", ["General"])[0] if cached_meta.get("categories") else "General")
+                    or (re.sub(r"(?<!^)([A-Z])", r" \1", str(rec_cat)) if rec_cat else None)
+                    or (metadata.get("categories", [None])[0] if metadata.get("categories") else None)
+                    or (cached_meta.get("categories", [None])[0] if cached_meta.get("categories") else None)
+                    or "--"
                 )
 
-                raw_impact = (
-                    metadata.get("securityScoreImpact")
-                    or cached_meta.get("securityScoreImpact")
-                    or metadata.get("scoreImpact")
-                    or metadata.get("weight")
-                    or props.get("weight")
-                    or metadata.get("maxScore")
-                )
-                score_impact = None
-                if raw_impact is not None:
-                    try:
-                        score_impact = float(raw_impact)
-                    except (ValueError, TypeError):
-                        score_impact = None
-                if score_impact is None or score_impact <= 0:
-                    sev_l = severity.lower()
-                    if sev_l in ("critical", "critical risk"):
-                        score_impact = 4.0
-                    elif sev_l == "high":
-                        score_impact = 3.0
-                    elif sev_l == "medium":
-                        score_impact = 2.0
-                    else:
-                        score_impact = 1.0
-
-                pot_score_str = f"+{score_impact:.1f}%"
-
-                # Accurate target resource resolution (strips assessment tails)
                 res_info = resolve_target_resource(item, sub.subscription_id, sub.display_name)
+                dedup_key = (res_info["resource_id"].lower(), item_key, display_name.lower())
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+
+                add_data = props.get("additionalData", {}) or {}
+                sw_info = _parse_additional_software_fields(add_data, display_name)
 
                 findings.append(
                     FindingModel(
-                        finding_id=f"sec02-{sub.subscription_id[:8]}-{item.get('name', '')[:10]}",
+                        finding_id=f"sec02-{sub.subscription_id[:8]}-{item.get('name', '')[:10]}-{len(findings)}",
                         assessment_id=self.assessment_id,
                         category=self.category,
                         subscription_id=sub.subscription_id,
@@ -243,8 +300,8 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
                         status="Unhealthy",
                         current_configuration=description[:150],
                         measured_value="Unhealthy",
-                        recommended_configuration=remediation[:150] if remediation != "--" else "Apply remediation guidance from Defender for Cloud",
-                        recommendation=remediation if remediation != "--" else f"Remediate Defender finding: {display_name}",
+                        recommended_configuration=remediation[:150],
+                        recommendation=remediation,
                         metric_period="Detected within last 30 days",
                         data_source="Defender for Cloud Assessments API",
                         evidence={
@@ -253,10 +310,10 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
                             "description": description,
                             "remediation": remediation,
                             "security_control": sec_ctrl,
-                            "potential_score_increase": pot_score_str,
                             "status_code": status_code,
+                            **sw_info,
                         },
-                        security_score_impact=float(score_impact),
+                        security_score_impact=None,
                         collected_at=now_str
                     )
                 )
@@ -273,8 +330,6 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
         else:
             status = AssessmentStatus.NO_FINDINGS
 
-        total_score_impact = round(sum(f.security_score_impact for f in findings if f.security_score_impact), 1) if findings else None
-
         return AssessmentResult(
             assessment_id=self.assessment_id,
             category=self.category,
@@ -284,8 +339,7 @@ class NewSecurityRecommendationsAssessment(BaseAssessment):
             findings_count=len(findings),
             findings=findings,
             errors=errors,
-            security_score_improvement=total_score_impact,
+            security_score_improvement=None,
             execution_time_seconds=round(time.time() - start_t, 2),
             last_run_time=now_str
         )
-

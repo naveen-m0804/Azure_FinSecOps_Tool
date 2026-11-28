@@ -34,8 +34,8 @@ def get_cutoff_date(days: int = 365, reference_date: datetime.datetime = None) -
 
 def get_observation_window(days: int = 30) -> Tuple[str, str]:
     """
-    Returns ISO 8601 strings (start_time, end_time) for metric queries.
+    Returns ISO 8601 UTC strings (start_time, end_time) with 'Z' suffix for Azure Monitor metric queries.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     start = now - datetime.timedelta(days=days)
-    return (start.isoformat(), now.isoformat())
+    return (start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ"))

@@ -14,7 +14,17 @@ class SavingsDeduplicationEngine:
         seen_resources: Dict[str, FindingModel] = {}
         non_resource_savings: List[FindingModel] = []
         
+        # Reference/evidence-only modules that must NOT be added to total savings (R6, R7, R10)
+        _non_additive_assessments = {
+            "top_20_opportunities",
+            "top_opportunities",
+            "disk_space",
+            "cost_comparison",
+        }
+
         for f in findings:
+            if f.assessment_id in _non_additive_assessments:
+                continue
             ann_sav = (f.estimated_annual_savings or 0.0) or ((f.estimated_monthly_savings or 0.0) * 12.0)
             if f.category != "cost" or ann_sav <= 0:
                 continue

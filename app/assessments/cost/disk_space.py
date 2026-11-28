@@ -10,7 +10,7 @@ from app.azure.monitor import MonitorAdapter
 from app.azure.cost_management import CostManagementAdapter
 from app.azure.pricing import PricingEngine
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.environment import resolve_environment, matches_target_tags
 
 
 def _extract_resource_group(resource_id: str, fallback: Optional[str] = None) -> str:
@@ -98,6 +98,9 @@ class DiskSpaceAssessment(BaseAssessment):
                 errors.append(f"Failed to fetch disks for sub {sub.subscription_id}: {ex}")
 
             for disk in disks:
+                disk_tags = disk.get("tags") or {}
+                if not matches_target_tags(disk_tags, context.target_tags):
+                    continue
                 resources_evaluated += 1
                 disk_name = disk.get("name", "")
                 disk_id = disk.get("id", "")
@@ -132,9 +135,9 @@ class DiskSpaceAssessment(BaseAssessment):
                 cost_info = cost_map.get(norm_id, {})
                 actual_cost = cost_info.get("cost")
                 currency = cost_info.get("currency", context.currency)
+                disk_region = disk.get("location", "")
 
-                # Tier rates fallback from PricingEngine
-                curr_cost = actual_cost if actual_cost is not None and actual_cost > 0 else PricingEngine.get_disk_monthly_price(sku_name, size_gb)
+                curr_cost: Optional[float] = float(actual_cost) if (actual_cost is not None and actual_cost > 0) else await PricingEngine.get_disk_monthly_price(sku_name, size_gb, disk_region, currency)
 
                 # Calculate provisioned IOPS based on Azure Managed Disk specs
                 prov_iops = int(props.get("diskIOPSReadWrite") or 0)
@@ -183,56 +186,37 @@ class DiskSpaceAssessment(BaseAssessment):
 
                         if prov_iops > 0:
                             iops_utilization = round((consumed_iops / prov_iops) * 100.0, 2)
-                        
-                        # Active I/O footprint on host hypervisor informs utilized capacity baseline
-                        if consumed_iops > 0 and prov_iops > 0:
-                            utilization_pct = min(85.0, max(15.0, round(20.0 + iops_utilization * 1.5, 1)))
-                        elif consumed_iops > 0:
-                            utilization_pct = 24.5
-                        else:
-                            utilization_pct = 18.0
-                    else:
-                        utilization_pct = 20.0
+
+                # Per Savings Formula Guide (R10): Supporting evidence only; no standalone savings formula.
+                if utilization_pct is not None:
+                    utilization_pct = max(0.0, min(100.0, round(float(utilization_pct), 1)))
+                    used_gb = round(size_gb * (utilization_pct / 100.0), 1)
+                    free_gb = round(max(0.0, size_gb - used_gb), 1)
                 else:
-                    utilization_pct = 0.0 if is_unattached else 20.0
+                    used_gb = None
+                    free_gb = None
 
-                utilization_pct = max(0.0, min(100.0, round(float(utilization_pct), 1)))
-                # Strictly calculate used and free space from total capacity size_gb:
-                # used_gb <= size_gb is strictly enforced at all times.
-                used_gb = round(size_gb * (utilization_pct / 100.0), 1)
-                free_gb = round(max(0.0, size_gb - used_gb), 1)
-
-                # 4. Sizing & Capacity Alert Categorization
+                # 4. Sizing & Capacity Alert Categorization (Supporting Evidence Only - 0 standalone savings)
                 if is_unattached:
                     status_str = "Unattached Disk (100% Free)"
                     severity = "High"
-                    recommendation = f"Managed disk '{disk_name}' ({size_gb} GB) is unattached. Delete or create snapshot to stop storage billing."
-                    monthly_saving = round(curr_cost, 2)
-                    calc_method = "Elimination of unattached disk storage costs"
-                elif utilization_pct >= 90.0:
+                    recommendation = f"Managed disk '{disk_name}' ({size_gb} GB) is unattached. Refer to Orphan Resources for deletion savings."
+                    calc_method = "Supporting evidence only; no standalone savings formula (avoid duplicate counting)"
+                elif utilization_pct is not None and utilization_pct >= 90.0:
                     status_str = f"Critical Capacity ({utilization_pct:.1f}% Used)"
                     severity = "Critical"
                     recommendation = f"Disk '{disk_name}' on '{host_vm}' has reached {utilization_pct:.1f}% capacity. Expand disk volume immediately to prevent application failure."
-                    monthly_saving = 0.0
                     calc_method = "Capacity expansion required to prevent downtime"
-                elif utilization_pct >= 80.0:
+                elif utilization_pct is not None and utilization_pct >= 80.0:
                     status_str = f"High Capacity ({utilization_pct:.1f}% Used)"
                     severity = "High"
                     recommendation = f"Disk '{disk_name}' on '{host_vm}' is at {utilization_pct:.1f}% capacity ({free_gb:.1f} GB free). Monitor volume and plan expansion."
-                    monthly_saving = 0.0
                     calc_method = "Capacity monitoring required"
-                elif utilization_pct <= 20.0 and size_gb >= 256:
-                    status_str = f"Overprovisioned Capacity ({utilization_pct:.1f}% Used)"
-                    severity = "Medium"
-                    recommendation = f"Disk '{disk_name}' on '{host_vm}' is provisioned at {size_gb} GB but only utilizes ~{used_gb:.1f} GB ({utilization_pct:.1f}%). Right-size capacity to save storage costs."
-                    monthly_saving = round(curr_cost * 0.40, 2)
-                    calc_method = "Right-sizing overprovisioned disk storage tier and size"
                 else:
-                    status_str = f"Normal Capacity ({utilization_pct:.1f}% Used)"
+                    status_str = f"Attached ({consumed_iops:.1f} Avg IOPS | {iops_utilization:.1f}% IOPS)"
                     severity = "Informational"
-                    recommendation = f"Managed disk '{disk_name}' on '{host_vm}' has healthy storage headroom ({free_gb:.1f} GB free)."
-                    monthly_saving = 0.0
-                    calc_method = "Optimal storage allocation"
+                    recommendation = f"Disk '{disk_name}' on '{host_vm}' ({size_gb} GB, {sku_name}). Guest filesystem space requires Azure Monitor Agent / Log Analytics; calculate any resize savings on Underutilized OS/Data Disk tabs."
+                    calc_method = "Supporting evidence only; no standalone savings formula (avoid duplicate counting)"
 
                 findings.append(
                     FindingModel(
@@ -245,12 +229,12 @@ class DiskSpaceAssessment(BaseAssessment):
                         resource_name=disk_name,
                         resource_type="Microsoft.Compute/disks",
                         resource_id=disk_id,
-                        region=disk.get("location", "global"),
+                        region=disk_region or "global",
                         severity=severity,
                         status=status_str,
-                        current_configuration=f"Host: {host_vm} | Tier: {sku_name} | Capacity: {size_gb} GB | Consumed: {used_gb} GB ({utilization_pct:.1f}%)",
-                        measured_value=f"{utilization_pct:.1f}% Utilization ({free_gb:.1f} GB Free)",
-                        recommended_configuration="Right-size capacity, delete unattached storage, or expand saturated disks",
+                        current_configuration=f"Host: {host_vm} | Tier: {sku_name} | Capacity: {size_gb} GB | Avg IOPS: {consumed_iops}",
+                        measured_value=f"{utilization_pct:.1f}% Used ({free_gb:.1f} GB Free)" if utilization_pct is not None else f"{consumed_iops:.1f} Avg IOPS ({iops_utilization:.1f}% of {prov_iops} IOPS)",
+                        recommended_configuration="Use as supporting evidence; calculate approved resizing on Underutilized OS/Data Disk tabs",
                         recommendation=recommendation,
                         metric_period=f"Last Completed Month ({cost_month})",
                         data_source="Azure Monitor & Microsoft.Compute Disks API",
@@ -261,24 +245,25 @@ class DiskSpaceAssessment(BaseAssessment):
                             "used_space_gb": used_gb,
                             "free_space_gb": free_gb,
                             "utilization_pct": utilization_pct,
+                            "consumed_iops": consumed_iops,
+                            "iops_utilization": iops_utilization,
                             "environment": env_name,
-                            "actual_cost_mtd": round(curr_cost, 2),
+                            "actual_cost_mtd": round(curr_cost, 2) if curr_cost is not None else None,
                             "disk_tier": sku_name,
                             "cost_month": cost_month
                         },
-                        current_monthly_cost=round(curr_cost, 2),
-                        estimated_monthly_savings=round(monthly_saving, 2),
-                        estimated_annual_savings=round(monthly_saving * 12, 2),
+                        current_monthly_cost=round(curr_cost, 2) if curr_cost is not None else None,
+                        estimated_monthly_savings=None,
+                        estimated_annual_savings=None,
                         currency=currency,
-                        savings_type="Storage Optimization" if monthly_saving > 0 else "Capacity Alert",
+                        savings_type="Supporting Evidence Only",
                         confidence="High",
                         calculation_method=calc_method,
-                        validation_required="Verify filesystem free space with host OS administrator",
+                        validation_required="Supporting evidence only; avoid duplicate savings counting with Underutilized OS/Data Disks.",
                         collected_at=now_str
                     )
                 )
 
-        total_monthly = sum((f.estimated_monthly_savings or 0.0) for f in findings if f.estimated_monthly_savings)
         status = AssessmentStatus.COMPLETED if findings else AssessmentStatus.NO_FINDINGS
         return AssessmentResult(
             assessment_id=self.assessment_id,
@@ -288,8 +273,8 @@ class DiskSpaceAssessment(BaseAssessment):
             resources_evaluated=max(resources_evaluated, 1),
             findings_count=len(findings),
             findings=findings,
-            total_monthly_savings=round(total_monthly, 2),
-            total_annual_savings=round(total_monthly * 12, 2),
+            total_monthly_savings=0.0,
+            total_annual_savings=0.0,
             currency=context.currency,
             errors=errors,
             execution_time_seconds=round(time.time() - start_t, 2),

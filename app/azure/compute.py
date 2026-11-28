@@ -55,32 +55,60 @@ class ComputeAdapter:
             return {"success": False, "status_code": 500, "error": str(ex)}
 
     @staticmethod
-    async def get_all_patch_assessments_via_arg(client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
+    async def _query_arg_paginated(client: AzureClientBase, subscription_id: str, query: str) -> List[Dict[str, Any]]:
+        """Executes an Azure Resource Graph query with $skipToken pagination."""
+        results: List[Dict[str, Any]] = []
+        try:
+            arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+            skip_token: Optional[str] = None
+            while True:
+                options: Dict[str, Any] = {"resultFormat": "objectArray", "$top": 1000}
+                if skip_token:
+                    options["$skipToken"] = skip_token
+                arg_payload = {
+                    "subscriptions": [subscription_id],
+                    "query": query,
+                    "options": options,
+                }
+                resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
+                if resp.status_code != 200:
+                    break
+                payload = resp.json()
+                data = payload.get("data", [])
+                if isinstance(data, list):
+                    results.extend(data)
+                skip_token = payload.get("$skipToken")
+                if not skip_token or not data:
+                    break
+        except Exception:
+            pass
+        return results
+
+    @classmethod
+    async def get_all_patch_assessments_via_arg(cls, client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
         """
         Retrieves patch assessment summaries across all VMs in the subscription via Azure Resource Graph.
         """
-        try:
-            arg_url = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
-            arg_payload = {
-                "subscriptions": [subscription_id],
-                "query": (
-                    f"patchassessmentresources "
-                    f"| where subscriptionId =~ '{subscription_id}' "
-                    f"| where type =~ 'microsoft.compute/virtualmachines/patchassessmentresults' "
-                    f"| project id, name, type, properties"
-                ),
-                "options": {
-                    "resultFormat": "objectArray"
-                }
-            }
-            resp = await client.execute_request("POST", arg_url, json_data=arg_payload)
-            if resp.status_code == 200:
-                data = resp.json().get("data", [])
-                if isinstance(data, list):
-                    return data
-        except Exception:
-            pass
-        return []
+        query = (
+            f"patchassessmentresources "
+            f"| where subscriptionId =~ '{subscription_id}' "
+            f"| where type =~ 'microsoft.compute/virtualmachines/patchassessmentresults' "
+            f"| project id, name, type, properties"
+        )
+        return await cls._query_arg_paginated(client, subscription_id, query)
+
+    @classmethod
+    async def get_software_patches_via_arg(cls, client: AzureClientBase, subscription_id: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves individual missing software patches across all VMs in the subscription via Azure Resource Graph.
+        """
+        query = (
+            f"patchassessmentresources "
+            f"| where subscriptionId =~ '{subscription_id}' "
+            f"| where type =~ 'microsoft.compute/virtualmachines/patchassessmentresults/softwarepatches' "
+            f"| project id, name, type, properties"
+        )
+        return await cls._query_arg_paginated(client, subscription_id, query)
 
     @staticmethod
     async def get_vm_instance_view(client: AzureClientBase, resource_id: str) -> Dict[str, Any]:

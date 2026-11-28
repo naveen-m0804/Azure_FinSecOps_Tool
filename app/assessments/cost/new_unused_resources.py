@@ -12,7 +12,7 @@ from app.azure.cost_management import CostManagementAdapter
 from app.azure.monitor import MonitorAdapter
 from app.azure.pricing import PricingEngine
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
+from app.utils.environment import resolve_environment, matches_target_tags
 
 
 def _parse_iso_datetime(dt_val: Any) -> Optional[datetime.datetime]:
@@ -228,6 +228,8 @@ class NewUnusedResourcesAssessment(BaseAssessment):
                 r_type = res.get("type", "")
                 props = res.get("properties") or {}
                 tags = res.get("tags") or {}
+                if not matches_target_tags(tags, context.target_tags):
+                    continue
                 system_data = res.get("systemData") or props.get("systemData") or {}
 
                 norm_id = normalize_resource_id(r_id).lower()
@@ -245,7 +247,12 @@ class NewUnusedResourcesAssessment(BaseAssessment):
 
                 is_unused = False
                 reason = ""
-                est_cost = 0.0
+                res_region = res.get("location", "")
+                norm_id_lookup = normalize_resource_id(r_id)
+                cost_info = cost_map.get(norm_id_lookup, {})
+                actual_cost = cost_info.get("cost")
+                currency = cost_info.get("currency", context.currency)
+                est_cost: Optional[float] = float(actual_cost) if (actual_cost is not None and actual_cost > 0) else None
 
                 # A. Unattached Managed Disks
                 if "microsoft.compute/disks" in r_type.lower():
@@ -253,15 +260,11 @@ class NewUnusedResourcesAssessment(BaseAssessment):
                     managed_by = props.get("managedBy")
                     if disk_state in ("Unattached", "Reserved") or not managed_by:
                         is_unused = True
-                        size_gb = props.get("diskSizeGB", 128)
-                        sku_name = res.get("sku", {}).get("name", "Premium_LRS")
-                        reason = f"Unattached {sku_name} ({size_gb} GB) not attached to any VM"
-                        if "premium" in sku_name.lower():
-                            est_cost = 19.71
-                        elif "standardssd" in sku_name.lower():
-                            est_cost = 9.60
-                        else:
-                            est_cost = 5.89
+                        size_gb = props.get("diskSizeGB")
+                        sku_name = res.get("sku", {}).get("name", "")
+                        reason = f"Unattached {sku_name} ({size_gb or '--'} GB) not attached to any VM"
+                        if est_cost is None and sku_name and size_gb:
+                            est_cost = await PricingEngine.get_disk_monthly_price(sku_name, int(size_gb), res_region, currency)
 
                 # B. Unassociated Public IPs
                 elif "microsoft.network/publicipaddresses" in r_type.lower():
@@ -270,7 +273,8 @@ class NewUnusedResourcesAssessment(BaseAssessment):
                         is_unused = True
                         sku_name = res.get("sku", {}).get("name", "Standard")
                         reason = f"Unassociated Public IP ({sku_name}) with no active NIC or gateway"
-                        est_cost = 3.65
+                        if est_cost is None:
+                            est_cost = await PricingEngine.get_public_ip_monthly_price(sku_name, res_region, currency)
 
                 # C. Unattached Network Interfaces (NICs)
                 elif "microsoft.network/networkinterfaces" in r_type.lower():
@@ -281,21 +285,21 @@ class NewUnusedResourcesAssessment(BaseAssessment):
                     if not vm and not pe and pe_text in (None, "", "null") and not nsg:
                         is_unused = True
                         reason = "Network Interface provisioned with no attached VM or Private Endpoint"
-                        est_cost = 2.50
+                        if est_cost is None:
+                            est_cost = 0.0
 
                 # D. Empty App Service Plans (0 Deployed Sites)
                 elif "microsoft.web/serverfarms" in r_type.lower():
                     num_sites = props.get("numberOfSites", 0)
-                    sku_tier = res.get("sku", {}).get("tier", "Standard")
+                    sku_info = res.get("sku", {})
+                    sku_tier = sku_info.get("tier", "")
+                    sku_name = sku_info.get("name", "")
+                    cap = int(sku_info.get("capacity") or props.get("targetWorkerCount") or 1)
                     if num_sites == 0 and sku_tier not in ("Free", "Shared"):
                         is_unused = True
-                        reason = f"App Service Plan ({sku_tier}) running 0 deployed web applications"
-                        if "premium" in sku_tier.lower():
-                            est_cost = 146.00
-                        elif "basic" in sku_tier.lower():
-                            est_cost = 54.75
-                        else:
-                            est_cost = 73.00
+                        reason = f"App Service Plan ({sku_tier} {sku_name}) running 0 deployed web applications"
+                        if est_cost is None and sku_name:
+                            est_cost = await PricingEngine.get_app_service_plan_monthly_price(sku_name, sku_tier, cap, res_region, currency)
 
                 # E. Deallocated or Stopped Virtual Machines
                 elif "microsoft.compute/virtualmachines" in r_type.lower():
@@ -307,28 +311,29 @@ class NewUnusedResourcesAssessment(BaseAssessment):
                                 vm_state = st.get("displayStatus", "")
                     if "deallocat" in vm_state.lower() or "stop" in vm_state.lower():
                         is_unused = True
-                        vm_size = props.get("hardwareProfile", {}).get("vmSize", "Standard_D2s_v5")
+                        vm_size = props.get("hardwareProfile", {}).get("vmSize", "Unknown")
                         reason = f"Virtual Machine ({vm_size}) continuously stopped/deallocated"
-                        rates = PricingEngine.get_vm_rates(vm_size)
-                        est_cost = rates.get("monthly", 87.60)
+                        # Note: Deallocated VMs only incur charges that actually appear in Cost Management
+                        if est_cost is None:
+                            est_cost = 0.0
 
                 # F. Snapshots Older Than 30 Days
                 elif "microsoft.compute/snapshots" in r_type.lower():
-                    size_gb = props.get("diskSizeGB", 128)
+                    size_gb = props.get("diskSizeGB")
                     sku_tier = res.get("sku", {}).get("name", "Standard_LRS")
                     is_unused = True
-                    reason = f"Orphaned snapshot {sku_tier} ({size_gb} GB) retaining old disk state"
-                    est_cost = round(size_gb * 0.05, 2)
+                    reason = f"Orphaned snapshot {sku_tier} ({size_gb or '--'} GB) retaining old disk state"
+                    if est_cost is None and size_gb:
+                        snap_rate = await PricingEngine.get_snapshot_gb_monthly_price(res_region, currency)
+                        if snap_rate is not None:
+                            est_cost = round(float(size_gb) * snap_rate, 2)
 
                 # 6. Apply Inactivity Threshold: Must be inactive for at least 30 days
                 if is_unused and days_inactive >= 30:
-                    norm_id_lookup = normalize_resource_id(r_id)
-                    cost_info = cost_map.get(norm_id_lookup, {})
-                    actual_cost = cost_info.get("cost")
-                    currency = cost_info.get("currency", context.currency)
-
-                    final_cost = actual_cost if actual_cost is not None and actual_cost > 0 else est_cost
-                    monthly_saving = round(final_cost, 2)
+                    final_cost = est_cost
+                    monthly_saving = round(final_cost, 2) if final_cost is not None else None
+                    annual_saving = round(monthly_saving * 12, 2) if monthly_saving is not None else None
+                    savings_pct = 100.0 if (monthly_saving is not None and monthly_saving > 0) else None
 
                     parsed = parse_azure_resource_id(r_id)
                     rg_name = parsed.get("resource_group") or res.get("resourceGroup") or "Unknown"
@@ -348,12 +353,15 @@ class NewUnusedResourcesAssessment(BaseAssessment):
                             resource_type=r_type,
                             resource_id=r_id,
                             region=res.get("location", "global"),
-                            severity="High" if monthly_saving > 50 else "Medium",
+                            severity="High" if (monthly_saving or 0) > 50 else "Medium",
                             status=f"Unused ({days_inactive} Days Inactive)",
                             current_configuration=f"Provisioned: {created_date} | Last Activity: {last_activity_date} ({days_inactive} days ago) | {reason}",
                             measured_value=f"Inactive for {days_inactive} days (Created: {created_date}, Last Activity: {last_activity_date})",
                             recommended_configuration="Decommission or delete abandoned infrastructure to stop recurring expenditure",
-                            recommendation=f"Resource '{r_name}' ({r_type.split('/')[-1]}) has remained inactive for {days_inactive} days (>30-day threshold). Decommission asset to save {currency} {monthly_saving:.2f}/month.",
+                            recommendation=(
+                                f"Resource '{r_name}' ({r_type.split('/')[-1]}) has remained inactive for {days_inactive} days (>30-day threshold)."
+                                + (f" Decommission asset to save {currency} {monthly_saving:.2f}/month." if monthly_saving is not None else " Validate last activity and owner before decommissioning.")
+                            ),
                             metric_period="> 30 days inactivity",
                             data_source="Azure Resource Graph & Activity Logs (90-Day History)",
                             evidence={
@@ -361,19 +369,20 @@ class NewUnusedResourcesAssessment(BaseAssessment):
                                 "last_activity": last_activity_date,
                                 "days_inactive": days_inactive,
                                 "environment": env_name,
-                                "actual_cost_mtd": round(final_cost, 2),
+                                "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
+                                "savings_pct": savings_pct,
                                 "cost_month": cost_month,
                                 "reason": reason,
                                 "unwanted_status": unwanted_status
                             },
-                            current_monthly_cost=round(final_cost, 2),
+                            current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
                             estimated_monthly_savings=monthly_saving,
-                            estimated_annual_savings=round(monthly_saving * 12, 2),
+                            estimated_annual_savings=annual_saving,
                             currency=currency,
-                            savings_type="Estimated Savings",
-                            confidence="High",
-                            calculation_method="Full elimination of recurring charges for abandoned infrastructure inactive for more than 30 days",
-                            validation_required="Confirm with application owner before decommissioning",
+                            savings_type="Estimated Savings" if monthly_saving is not None else "Not Estimated",
+                            confidence="High" if monthly_saving is not None else "Low",
+                            calculation_method="Monthly savings = charges that will cease; annual = monthly * 12 (100% only for charges fully eliminated)",
+                            validation_required="Validate last activity and owner; may overlap Orphan Resources or Old Snapshot Expired.",
                             collected_at=now_str
                         )
                     )

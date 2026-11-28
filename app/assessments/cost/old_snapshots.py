@@ -9,6 +9,7 @@ from app.azure.cost_management import CostManagementAdapter
 from app.azure.pricing import PricingEngine
 from app.utils.dates import get_previous_calendar_month, get_cutoff_date
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
+from app.utils.environment import matches_target_tags
 
 class OldSnapshotsAssessment(BaseAssessment):
     assessment_id = "old_snapshots"
@@ -45,6 +46,8 @@ class OldSnapshotsAssessment(BaseAssessment):
 
             snapshots = await ComputeAdapter.get_snapshots(context.client, sub.subscription_id)
             for snap in snapshots:
+                if not matches_target_tags(snap.get("tags"), context.target_tags):
+                    continue
                 resources_evaluated += 1
                 snap_name = snap.get("name", "")
                 snap_id = snap.get("id", "")
@@ -69,15 +72,24 @@ class OldSnapshotsAssessment(BaseAssessment):
                     if not size_gb:
                         size_gb = 128
 
+                    snap_region = snap.get("location", "")
                     incremental = props.get("incremental", False)
                     norm_id = normalize_resource_id(snap_id)
                     cost_info = cost_map.get(norm_id, {})
                     actual_cost = cost_info.get("cost")
                     currency = cost_info.get("currency", context.currency)
 
-                    # If actual cost from API, use it; otherwise calculate based on standard snapshot storage rate ($0.05/GB/mo)
-                    monthly_price = actual_cost if actual_cost is not None and actual_cost > 0 else round(size_gb * PricingEngine.SNAPSHOT_GB_MONTHLY, 2)
-                    savings_type = "Actual Cost" if (actual_cost is not None and actual_cost > 0) else "Estimated Savings"
+                    # Formula (R16): Monthly savings = snapshot monthly cost; annual = monthly * 12; % = 100% if entire charge stops
+                    monthly_price: Optional[float] = None
+                    savings_type = "Not Estimated"
+                    if actual_cost is not None and actual_cost > 0:
+                        monthly_price = float(actual_cost)
+                        savings_type = "Actual Cost"
+                    elif size_gb:
+                        snap_rate = await PricingEngine.get_snapshot_gb_monthly_price(snap_region, currency)
+                        if snap_rate is not None and snap_rate > 0:
+                            monthly_price = round(float(size_gb) * snap_rate, 2)
+                            savings_type = "Estimated Savings"
                     parsed = parse_azure_resource_id(snap_id)
 
                     # Extract source disk from creationData if available
@@ -133,17 +145,18 @@ class OldSnapshotsAssessment(BaseAssessment):
                                 "incremental": incremental,
                                 "created_date": time_created.strftime("%Y-%m-%d"),
                                 "previous_month_actual_cost": actual_cost,
-                                "actual_cost_mtd": round(monthly_price, 2),
+                                "actual_cost_mtd": round(monthly_price, 2) if monthly_price is not None else None,
+                                "savings_pct": 100.0 if (monthly_price is not None and monthly_price > 0) else None,
                                 "cost_month": cost_month
                             },
-                            current_monthly_cost=round(monthly_price, 2),
-                            estimated_monthly_savings=round(monthly_price, 2),
-                            estimated_annual_savings=round(monthly_price * 12, 2),
+                            current_monthly_cost=round(monthly_price, 2) if monthly_price is not None else None,
+                            estimated_monthly_savings=round(monthly_price, 2) if monthly_price is not None else None,
+                            estimated_annual_savings=round(monthly_price * 12, 2) if monthly_price is not None else None,
                             currency=currency,
                             savings_type=savings_type,
-                            confidence="High",
-                            calculation_method="100% avoidable snapshot storage fee via resource deletion",
-                            validation_required="Confirm snapshot is not required for disaster recovery or regulatory audit compliance",
+                            confidence="High" if monthly_price is not None else "Low",
+                            calculation_method="Monthly savings = snapshot monthly cost; annual = monthly * 12; savings % = 100% if entire snapshot charge stops",
+                            validation_required="Deletion approval required; check retention, restore/DR needs and ownership (overlaps New and Unused Resources).",
                             collected_at=now_str
                         )
                     )

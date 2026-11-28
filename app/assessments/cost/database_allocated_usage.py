@@ -8,76 +8,9 @@ from app.azure.database import DatabaseAdapter
 from app.azure.resources import ResourcesAdapter
 from app.azure.monitor import MonitorAdapter
 from app.azure.cost_management import CostManagementAdapter
+from app.azure.pricing import PricingEngine
 from app.utils.resource_ids import parse_azure_resource_id, normalize_resource_id
-from app.utils.environment import resolve_environment
-
-
-def _get_database_monthly_cost(sku_name: str, tier_name: str = "", allocated_gb: float = 250.0) -> float:
-    """Calculates realistic Azure baseline cost for a database when Cost Management data is not available."""
-    name = (sku_name or "").upper().strip()
-    tier = (tier_name or "").upper().strip()
-
-    # Basic Tier
-    if "BASIC" in name or "BASIC" in tier or name == "B":
-        return 4.99
-
-    # Standard DTU Tier
-    if "S0" in name:
-        base = 14.72
-    elif "S1" in name:
-        base = 29.43
-    elif "S2" in name:
-        base = 73.58
-    elif "S3" in name:
-        base = 147.17
-    elif "S4" in name:
-        base = 294.34
-    elif "S6" in name:
-        base = 588.67
-    elif "S7" in name:
-        base = 1177.34
-    elif "S9" in name:
-        base = 2354.69
-    elif "S12" in name:
-        base = 4709.38
-    elif "STANDARD" in tier or "STANDARD" in name:
-        base = 73.58  # Default Standard S2 baseline
-    # Premium DTU Tier
-    elif "P1" in name:
-        base = 465.00
-    elif "P2" in name:
-        base = 930.00
-    elif "P4" in name:
-        base = 1860.00
-    elif "P6" in name:
-        base = 3720.00
-    elif "PREMIUM" in tier:
-        base = 465.00
-    # General Purpose vCore (SQL DB / PostgreSQL / MySQL)
-    elif "GP" in name or "GENERAL" in name or "GENERALPURPOSE" in tier:
-        if "4" in name:
-            base = 480.00
-        elif "8" in name:
-            base = 960.00
-        else:
-            base = 240.00
-    # Business Critical / Memory Optimized vCore
-    elif "BC" in name or "CRITICAL" in name or "MEMORYOPTIMIZED" in tier:
-        if "4" in name:
-            base = 1080.00
-        else:
-            base = 540.00
-    # Burstable (B1ms, B2s Flexible Server)
-    elif "B1" in name:
-        base = 25.50
-    elif "B2" in name:
-        base = 51.00
-    else:
-        base = 73.58
-
-    # Extra storage beyond 250 GB for Standard DTU ($0.17/GB/mo)
-    extra_storage_cost = max(0.0, allocated_gb - 250.0) * 0.17 if "S" in name else 0.0
-    return round(base + extra_storage_cost, 2)
+from app.utils.environment import resolve_environment, matches_target_tags
 
 
 class DatabaseAllocatedUsageAssessment(BaseAssessment):
@@ -141,6 +74,10 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
 
                     # Skip system databases
                     if db_name.lower() in ("master", "tempdb", "model", "msdb"):
+                        continue
+
+                    db_tags = db.get("tags") or s.get("tags") or {}
+                    if not matches_target_tags(db_tags, context.target_tags):
                         continue
 
                     props = db.get("properties", {})
@@ -208,22 +145,29 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                         if server_cost and server_cost > 0:
                             actual_cost = server_cost
 
+                    db_region = db.get("location") or s.get("location") or ""
                     if actual_cost is not None and actual_cost > 0:
-                        final_cost = actual_cost
+                        final_cost: Optional[float] = float(actual_cost)
                     else:
-                        final_cost = _get_database_monthly_cost(sku_name, sku_tier, allocated_gb)
+                        final_cost = await PricingEngine.get_sql_database_monthly_price(sku_name, sku_tier, db_region, currency)
 
                     # 4. Strict Underutilization Condition: Storage usage < 5% of allocated capacity
                     if utilization_pct < 5.0 and allocated_gb >= 5.0:
                         target_allocated_gb = max(10.0, round(used_gb * 2.0, 1))
                         reclaimable_gb = max(0.0, round(allocated_gb - target_allocated_gb, 1))
 
-                        # Calculate savings: storage rate is $0.115/GB/mo (vCore) or $0.17/GB/mo (DTU extra storage)
-                        rate = 0.17 if "S" in sku_name.upper() and allocated_gb > 250 else 0.115
-                        monthly_saving = round(reclaimable_gb * rate, 2)
-                        if monthly_saving > final_cost * 0.60:
-                            monthly_saving = round(final_cost * 0.60, 2)
-                        annual_saving = round(monthly_saving * 12.0, 2)
+                        # Dynamic storage rate from Azure Retail Prices API
+                        rate = await PricingEngine.get_database_storage_gb_price("sql", db_region, currency)
+                        monthly_saving: Optional[float] = None
+                        annual_saving: Optional[float] = None
+                        savings_pct: Optional[float] = None
+                        if rate is not None and rate > 0:
+                            monthly_saving = round(reclaimable_gb * rate, 2)
+                            if final_cost is not None and final_cost > 0:
+                                if monthly_saving > final_cost:
+                                    monthly_saving = round(final_cost, 2)
+                                savings_pct = round((monthly_saving / final_cost) * 100.0, 2)
+                            annual_saving = round(monthly_saving * 12.0, 2)
 
                         parsed = parse_azure_resource_id(db_id)
                         rg_name = parsed.get("resource_group") or s.get("resourceGroup") or "Unknown"
@@ -266,18 +210,19 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                                     "reclaimable_headroom_gb": reclaimable_gb,
                                     "target_allocated_gb": target_allocated_gb,
                                     "environment": env_name,
-                                    "actual_cost_mtd": round(final_cost, 2),
+                                    "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
+                                    "savings_pct": savings_pct,
                                     "cost_month": cost_month,
                                     "sku": sku_name
                                 },
-                                current_monthly_cost=round(final_cost, 2),
+                                current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
                                 estimated_monthly_savings=monthly_saving,
                                 estimated_annual_savings=annual_saving,
                                 currency=currency,
-                                savings_type="Estimated Savings",
-                                confidence="High" if actual_cost > 0 else "Medium",
-                                calculation_method=f"Reclaimable headroom {reclaimable_gb:.1f} GB * ${rate:.3f}/GB/mo storage rate",
-                                validation_required="Verify data growth projections before reducing max database size",
+                                savings_type="Estimated Savings" if monthly_saving is not None else "Not Estimated",
+                                confidence="High" if (actual_cost and actual_cost > 0 and monthly_saving is not None) else "Low",
+                                calculation_method="Monthly savings = current DB storage/compute eligible cost - proposed cost/storage; annual = monthly * 12",
+                                validation_required="Avoid overlap with Database CPU - DTU Performance; verify data growth projections before reducing max database size.",
                                 collected_at=now_str
                             )
                         )
@@ -292,6 +237,8 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                 errors.append(f"Failed to scan PostgreSQL flexible servers for sub {sub.subscription_id}: {ex}")
 
             for pg in pg_servers:
+                if not matches_target_tags(pg.get("tags"), context.target_tags):
+                    continue
                 resources_evaluated += 1
                 pg_name = pg.get("name", "")
                 pg_id = pg.get("id", "")
@@ -335,9 +282,12 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                     actual_cost = cost_info.get("cost")
                     currency = cost_info.get("currency", context.currency)
 
-                    final_cost = actual_cost if actual_cost and actual_cost > 0 else _get_database_monthly_cost(pg_sku_name, pg_sku_tier, allocated_gb)
-                    monthly_saving = round(reclaimable_gb * 0.115, 2)
-                    annual_saving = round(monthly_saving * 12.0, 2)
+                    pg_region = pg.get("location", "")
+                    final_cost: Optional[float] = float(actual_cost) if (actual_cost and actual_cost > 0) else None
+                    rate = await PricingEngine.get_database_storage_gb_price("postgresql", pg_region, currency)
+                    monthly_saving = round(reclaimable_gb * rate, 2) if (rate is not None and rate > 0) else None
+                    annual_saving = round(monthly_saving * 12.0, 2) if monthly_saving is not None else None
+                    savings_pct = round((monthly_saving / final_cost) * 100.0, 2) if (monthly_saving is not None and final_cost and final_cost > 0) else None
 
                     parsed = parse_azure_resource_id(pg_id)
                     rg_name = parsed.get("resource_group") or "Unknown"
@@ -379,18 +329,19 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                                 "reclaimable_headroom_gb": reclaimable_gb,
                                 "target_allocated_gb": target_allocated_gb,
                                 "environment": env_name,
-                                "actual_cost_mtd": round(final_cost, 2),
+                                "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
+                                "savings_pct": savings_pct,
                                 "cost_month": cost_month,
                                 "sku": pg_sku_name
                             },
-                            current_monthly_cost=round(final_cost, 2),
+                            current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
                             estimated_monthly_savings=monthly_saving,
                             estimated_annual_savings=annual_saving,
                             currency=currency,
-                            savings_type="Estimated Savings",
-                            confidence="High" if actual_cost > 0 else "Medium",
-                            calculation_method=f"Reclaimable headroom {reclaimable_gb:.1f} GB * $0.115/GB/mo storage rate",
-                            validation_required="Verify data growth projections before reducing storage size",
+                            savings_type="Estimated Savings" if monthly_saving is not None else "Not Estimated",
+                            confidence="High" if (actual_cost and actual_cost > 0 and monthly_saving is not None) else "Low",
+                            calculation_method="Monthly savings = current DB storage/compute eligible cost - proposed cost/storage; annual = monthly * 12",
+                            validation_required="Avoid overlap with Database CPU - DTU Performance; verify data growth projections before reducing storage size.",
                             collected_at=now_str
                         )
                     )
@@ -405,6 +356,8 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                 errors.append(f"Failed to scan MySQL flexible servers for sub {sub.subscription_id}: {ex}")
 
             for my in mysql_servers:
+                if not matches_target_tags(my.get("tags"), context.target_tags):
+                    continue
                 resources_evaluated += 1
                 my_name = my.get("name", "")
                 my_id = my.get("id", "")
@@ -447,9 +400,12 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                     actual_cost = cost_info.get("cost")
                     currency = cost_info.get("currency", context.currency)
 
-                    final_cost = actual_cost if actual_cost and actual_cost > 0 else _get_database_monthly_cost(my_sku_name, my_sku_tier, allocated_gb)
-                    monthly_saving = round(reclaimable_gb * 0.115, 2)
-                    annual_saving = round(monthly_saving * 12.0, 2)
+                    my_region = my.get("location", "")
+                    final_cost: Optional[float] = float(actual_cost) if (actual_cost and actual_cost > 0) else None
+                    rate = await PricingEngine.get_database_storage_gb_price("mysql", my_region, currency)
+                    monthly_saving = round(reclaimable_gb * rate, 2) if (rate is not None and rate > 0) else None
+                    annual_saving = round(monthly_saving * 12.0, 2) if monthly_saving is not None else None
+                    savings_pct = round((monthly_saving / final_cost) * 100.0, 2) if (monthly_saving is not None and final_cost and final_cost > 0) else None
 
                     parsed = parse_azure_resource_id(my_id)
                     rg_name = parsed.get("resource_group") or "Unknown"
@@ -491,18 +447,19 @@ class DatabaseAllocatedUsageAssessment(BaseAssessment):
                                 "reclaimable_headroom_gb": reclaimable_gb,
                                 "target_allocated_gb": target_allocated_gb,
                                 "environment": env_name,
-                                "actual_cost_mtd": round(final_cost, 2),
+                                "actual_cost_mtd": round(final_cost, 2) if final_cost is not None else None,
+                                "savings_pct": savings_pct,
                                 "cost_month": cost_month,
                                 "sku": my_sku_name
                             },
-                            current_monthly_cost=round(final_cost, 2),
+                            current_monthly_cost=round(final_cost, 2) if final_cost is not None else None,
                             estimated_monthly_savings=monthly_saving,
                             estimated_annual_savings=annual_saving,
                             currency=currency,
-                            savings_type="Estimated Savings",
-                            confidence="High" if actual_cost > 0 else "Medium",
-                            calculation_method=f"Reclaimable headroom {reclaimable_gb:.1f} GB * $0.115/GB/mo storage rate",
-                            validation_required="Verify data growth projections before reducing storage size",
+                            savings_type="Estimated Savings" if monthly_saving is not None else "Not Estimated",
+                            confidence="High" if (actual_cost and actual_cost > 0 and monthly_saving is not None) else "Low",
+                            calculation_method="Monthly savings = current DB storage/compute eligible cost - proposed cost/storage; annual = monthly * 12",
+                            validation_required="Avoid overlap with Database CPU - DTU Performance; verify data growth projections before reducing storage size.",
                             collected_at=now_str
                         )
                     )
